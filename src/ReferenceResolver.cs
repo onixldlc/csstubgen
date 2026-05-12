@@ -132,7 +132,7 @@ public static class ReferenceResolver
             foreach (var field in entry.Type.Fields)
             {
                 if (!field.IsPublic) continue;
-                if (rt.NeededMembers.Count > 0 && !rt.NeededMembers.Contains(field.Name)) continue;
+                if (!rt.NeededMembers.Contains(field.Name)) continue;
                 EnqueueTypeRef(field.FieldType, queue, knownAssemblies, result, entry.Assembly);
             }
 

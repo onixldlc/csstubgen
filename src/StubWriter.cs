@@ -118,7 +118,7 @@ public static class StubWriter
         // fields
         foreach (var field in type.Fields.Where(f => f.IsPublic).OrderBy(f => f.Name))
         {
-            if (rt.NeededMembers.Count > 0 && !rt.NeededMembers.Contains(field.Name)) continue;
+            if (!rt.NeededMembers.Contains(field.Name)) continue;
             if (field.IsSpecialName) continue;
 
             var fMods = field.IsStatic ? "public static" : "public";
@@ -319,15 +319,22 @@ public static class StubWriter
         {
             CheckNamespace(rt.Definition.BaseType, usings);
             foreach (var field in rt.Definition.Fields.Where(f => f.IsPublic))
+            {
+                if (!rt.NeededMembers.Contains(field.Name)) continue;
                 CheckNamespace(field.FieldType, usings);
+            }
             foreach (var method in rt.Definition.Methods.Where(m => m.IsPublic))
             {
+                if (method.IsConstructor || !rt.NeededMembers.Contains(method.Name)) continue;
                 CheckNamespace(method.ReturnType, usings);
                 foreach (var p in method.Parameters)
                     CheckNamespace(p.ParameterType, usings);
             }
             foreach (var prop in rt.Definition.Properties)
+            {
+                if (!rt.NeededMembers.Contains(prop.Name)) continue;
                 CheckNamespace(prop.PropertyType, usings);
+            }
         }
 
         // remove namespaces that are defined in our stubs
@@ -387,7 +394,7 @@ public static class StubWriter
 
         // check if any type references UnityEngine
         bool needsUnity = result.TypesByAssembly[assemblyName]
-            .Any(t => ReferencesUnity(t.Definition));
+            .Any(t => ReferencesUnity(t));
 
         if (needsUnity)
         {
@@ -413,11 +420,13 @@ public static class StubWriter
         File.WriteAllText(Path.Combine(dir, $"{assemblyName}.csproj"), sb.ToString());
     }
 
-    static bool ReferencesUnity(TypeDefinition type)
+    static bool ReferencesUnity(ResolvedType rt)
     {
+        var type = rt.Definition;
         if (type.BaseType?.Namespace?.StartsWith("UnityEngine") == true) return true;
-        if (type.Fields.Any(f => f.FieldType.Namespace?.StartsWith("UnityEngine") == true)) return true;
-        if (type.Methods.Any(m => m.ReturnType.Namespace?.StartsWith("UnityEngine") == true)) return true;
+        if (type.Fields.Any(f => f.IsPublic && rt.NeededMembers.Contains(f.Name) && f.FieldType.Namespace?.StartsWith("UnityEngine") == true)) return true;
+        if (type.Methods.Any(m => m.IsPublic && rt.NeededMembers.Contains(m.Name) && m.ReturnType.Namespace?.StartsWith("UnityEngine") == true)) return true;
+        if (type.Properties.Any(p => rt.NeededMembers.Contains(p.Name) && p.PropertyType.Namespace?.StartsWith("UnityEngine") == true)) return true;
         return false;
     }
 

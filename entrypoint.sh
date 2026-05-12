@@ -1,5 +1,5 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 case "${1:-}" in
     strip)
@@ -8,10 +8,12 @@ case "${1:-}" in
         for dll in /input/*.dll; do
             [ -f "$dll" ] || continue
             name=$(basename "$dll")
-            if refasmer -v -O /output "$dll" 2>/dev/null; then
+            cp "$dll" /output/"$name"
+            if refasmer -v --omit-non-api-members false -O /output /output/"$name"; then
                 echo "  ✓ $name"
-                ((count++))
+                count=$((count + 1))
             else
+                rm -f /output/"$name"
                 echo "  ✗ $name (skipped)"
             fi
         done
