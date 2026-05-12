@@ -136,9 +136,10 @@ public static class ReferenceResolver
                 }
             }
 
-            result.AddType(rt);
+            if (!IsUnityAssembly(asmName))
+                result.AddType(rt);
 
-            // walk dependencies
+            // walk dependencies (even for Unity types — need transitive resolution)
 
             // base type
             EnqueueBaseType(typeDef, queue, knownAssemblies, result, asmName);
@@ -345,6 +346,11 @@ public static class ReferenceResolver
             return GetAssemblyScope(gen.ElementType);
         return (type.Scope as AssemblyNameReference)?.Name
             ?? (type.Scope as ModuleDefinition)?.Assembly?.Name?.Name;
+    }
+
+    static bool IsUnityAssembly(string assemblyName)
+    {
+        return assemblyName == "UnityEngine" || assemblyName.StartsWith("UnityEngine.");
     }
 
     static bool IsFrameworkType(string name)
