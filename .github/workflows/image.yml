@@ -2,9 +2,17 @@ name: Container Image
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+      - 'src/**'
+      - '.github/workflows/image.yml'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version tag (default: latest git tag)'
+        required: false
 
 env:
   REGISTRY: ghcr.io
@@ -19,6 +27,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "tag=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            echo "tag=${TAG#v}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/login-action@v3
         with:
@@ -32,7 +52,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=semver,pattern={{version}}
+            type=raw,value=${{ steps.version.outputs.tag }},enable=${{ steps.version.outputs.tag != '' }}
             type=sha
 
       - uses: docker/build-push-action@v6
