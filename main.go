@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,7 +14,14 @@ import (
 //go:embed Dockerfile entrypoint.sh .dockerignore src/*
 var dockerContext embed.FS
 
-const imageName = "csstubgen"
+const (
+	defaultImage = "ghcr.io/onixldlc/csstubgen:latest"
+	localImage   = "csstubgen"
+)
+
+type Config struct {
+	Image string `json:"image,omitempty"`
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -28,6 +36,8 @@ func main() {
 		cmdGenerate(os.Args[2:])
 	case "list", "ls":
 		listAvailable()
+	case "image":
+		cmdImage(os.Args[2:])
 	case "build":
 		mustBuildImage()
 	case "help", "-h", "--help":
@@ -39,10 +49,104 @@ func main() {
 	}
 }
 
+// --- config ---
+
+func configDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "csstubgen")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "csstubgen")
+}
+
+func configPath() string {
+	return filepath.Join(configDir(), "config.json")
+}
+
+func loadConfig() Config {
+	data, err := os.ReadFile(configPath())
+	if err != nil {
+		return Config{}
+	}
+	var cfg Config
+	json.Unmarshal(data, &cfg)
+	return cfg
+}
+
+func saveConfig(cfg Config) {
+	dir := configDir()
+	os.MkdirAll(dir, 0755)
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath(), data, 0644); err != nil {
+		fatal("can't write config: %v", err)
+	}
+}
+
+func resolveImage(override string) string {
+	if override != "" {
+		return override
+	}
+	cfg := loadConfig()
+	if cfg.Image != "" {
+		return cfg.Image
+	}
+	return defaultImage
+}
+
+// --- image: manage container images ---
+
+func cmdImage(args []string) {
+	if len(args) > 0 && args[0] != "ls" {
+		cfg := loadConfig()
+		cfg.Image = args[0]
+		saveConfig(cfg)
+		fmt.Printf("[csstubgen] Image set to: %s\n", args[0])
+		return
+	}
+
+	rt := findRuntime()
+	cfg := loadConfig()
+	active := cfg.Image
+	if active == "" {
+		active = defaultImage
+	}
+
+	fmt.Println("Container images:")
+	fmt.Println()
+
+	if imageExists(rt, defaultImage) {
+		marker := "  "
+		if active == defaultImage {
+			marker = "* "
+		}
+		fmt.Printf("  %s%-50s (default)\n", marker, defaultImage)
+	} else {
+		marker := "  "
+		if active == defaultImage {
+			marker = "* "
+		}
+		fmt.Printf("  %s%-50s (default, not pulled)\n", marker, defaultImage)
+	}
+
+	if imageExists(rt, localImage) {
+		marker := "  "
+		if active == localImage {
+			marker = "* "
+		}
+		fmt.Printf("  %s%-50s (local build)\n", marker, localImage)
+	}
+
+	fmt.Println()
+	fmt.Printf("Active: %s\n", active)
+	fmt.Println()
+	fmt.Println("Set image:   csstubgen image <name>")
+	fmt.Println("Build local: csstubgen build")
+}
+
 // --- dll: strip game DLLs and store ---
 
 func cmdDll(args []string) {
-	var name, dllDir string
+	var name, dllDir, image string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -52,10 +156,14 @@ func cmdDll(args []string) {
 		case "-d":
 			i++
 			dllDir = args[i]
+		case "--image", "-i":
+			i++
+			image = args[i]
 		case "-h", "--help":
-			fmt.Println("Usage: csstubgen dll --name <name> [-d <dll-dir>]")
+			fmt.Println("Usage: csstubgen dll --name <name> [-d <dll-dir>] [--image <image>]")
 			fmt.Println("  Strips game DLLs and stores in ~/.local/share/csstubgen/<name>/")
 			fmt.Println("  -d defaults to current directory")
+			fmt.Println("  --image overrides configured container image")
 			return
 		}
 	}
@@ -72,7 +180,6 @@ func cmdDll(args []string) {
 		fatal("DLL directory not found: %s", dllDir)
 	}
 
-	// count DLLs
 	matches, _ := filepath.Glob(filepath.Join(dllDir, "*.dll"))
 	if len(matches) == 0 {
 		fatal("No .dll files in %s", dllDir)
@@ -83,12 +190,13 @@ func cmdDll(args []string) {
 	os.MkdirAll(storeDir, 0755)
 
 	rt := findRuntime()
-	ensureImage(rt)
+	img := resolveImage(image)
+	ensureImage(rt, img)
 
 	cmd := exec.Command(rt, "run", "--rm",
 		"-v", dllDir+":/input:ro,z",
 		"-v", storeDir+":/output:z",
-		imageName, "strip",
+		img, "strip",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -103,7 +211,7 @@ func cmdDll(args []string) {
 // --- generate: create stubs from source + stripped DLLs ---
 
 func cmdGenerate(args []string) {
-	var name, outDir, unityVer string
+	var name, outDir, unityVer, image string
 	var sources []string
 	outDir = "./stubs"
 	unityVer = "2022.3.9"
@@ -122,8 +230,11 @@ func cmdGenerate(args []string) {
 		case "--unity-version":
 			i++
 			unityVer = args[i]
+		case "--image", "-i":
+			i++
+			image = args[i]
 		case "-h", "--help":
-			fmt.Println("Usage: csstubgen generate --name <name> [-s <source>...] [-o <output>]")
+			fmt.Println("Usage: csstubgen generate --name <name> [-s <source>...] [-o <output>] [--image <image>]")
 			fmt.Println("  Omit --name to list available stripped DLL sets")
 			return
 		default:
@@ -149,14 +260,15 @@ func cmdGenerate(args []string) {
 
 	cwd, _ := os.Getwd()
 	rt := findRuntime()
-	ensureImage(rt)
+	img := resolveImage(image)
+	ensureImage(rt, img)
 
 	containerArgs := []string{
 		"run", "--rm",
 		"-v", cwd + ":/work:z",
 		"-v", storeDir + ":/ref:ro,z",
 		"-w", "/work",
-		imageName, "generate",
+		img, "generate",
 	}
 
 	for _, s := range sources {
@@ -196,12 +308,17 @@ func listAvailable() {
 
 // --- build: container image management ---
 
-func ensureImage(rt string) {
-	if imageExists(rt) {
+func ensureImage(rt, image string) {
+	if imageExists(rt, image) {
 		return
 	}
-	fmt.Println("[csstubgen] Image not found, building (first run)...")
-	mustBuildImage()
+	fmt.Printf("[csstubgen] Image %s not found locally, pulling...\n", image)
+	cmd := exec.Command(rt, "pull", image)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fatal("Failed to pull %s: %v\nBuild locally with: csstubgen build", image, err)
+	}
 }
 
 func mustBuildImage() {
@@ -210,7 +327,7 @@ func mustBuildImage() {
 	defer os.RemoveAll(contextDir)
 
 	fmt.Println("[csstubgen] Building container image...")
-	cmd := exec.Command(rt, "build", "-t", imageName, contextDir)
+	cmd := exec.Command(rt, "build", "-t", localImage, contextDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -218,6 +335,7 @@ func mustBuildImage() {
 		fatal("image build failed: %v", err)
 	}
 	fmt.Println("[csstubgen] Image built ✓")
+	fmt.Printf("[csstubgen] Use with: csstubgen image %s\n", localImage)
 }
 
 func extractDockerContext() string {
@@ -257,8 +375,10 @@ func findRuntime() string {
 	return ""
 }
 
-func imageExists(rt string) bool {
-	cmd := exec.Command(rt, "image", "exists", imageName)
+func imageExists(rt, image string) bool {
+	cmd := exec.Command(rt, "image", "inspect", image)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	return cmd.Run() == nil
 }
 
@@ -279,19 +399,22 @@ func printUsage() {
 	fmt.Print(`csstubgen - Generate minimal C# stubs for Unity mod CI builds
 
 Usage:
-  csstubgen dll --name <name> [-d <dll-dir>]
+  csstubgen dll --name <name> [-d <dll-dir>] [--image <image>]
     Strip game DLLs, store in ~/.local/share/csstubgen/<name>/
     DLL directory mounted read-only. Defaults to cwd.
 
-  csstubgen generate --name <name> [-s <source>...] [-o <output>]
+  csstubgen generate --name <name> [-s <source>...] [-o <output>] [--image <image>]
     Generate minimal stubs from mod source + stored stripped DLLs.
     Omit --name to list available stripped DLL sets.
 
   csstubgen list
     List available stripped DLL sets.
 
+  csstubgen image [<name>]
+    List available container images, or set active image.
+
   csstubgen build
-    Force rebuild container image.
+    Build container image locally.
 
 Options:
   --name, -n           Name for DLL set (e.g. nuclear-option-v3.3)
@@ -299,10 +422,14 @@ Options:
   -s, --source         Mod source .cs files or directory (repeatable)
   -o, --out            Output directory for stubs (default: ./stubs)
   --unity-version      UnityEngine.Modules version (default: 2022.3.9)
+  --image, -i          Container image to use (default: ` + defaultImage + `)
+
+Config: ~/.config/csstubgen/config.json
 
 Examples:
   cd /path/to/game/dll && csstubgen dll --name nuclear-option-v3.3
   cd /path/to/mod && csstubgen generate --name nuclear-option-v3.3 -s ./*.cs
-  csstubgen generate --name nuclear-option-v3.3 -s ./src/ -o ./ci/stubs/
+  csstubgen image csstubgen            # switch to local build
+  csstubgen image ` + defaultImage + `  # switch back to default
 `)
 }
