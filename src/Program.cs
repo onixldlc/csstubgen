@@ -76,6 +76,7 @@ class Program
         Console.WriteLine($"[csstubgen] Resolved member accesses: {analysis.TypeMembers.Sum(kv => kv.Value.Count)}");
         Console.WriteLine($"[csstubgen] Unresolved members: {string.Join(", ", analysis.UnresolvedMembers.OrderBy(x => x))}");
 
+        Console.WriteLine("[csstubgen] Resolving members:");
         var result = ReferenceResolver.Resolve(analysis, refDlls);
         Console.WriteLine($"[csstubgen] Stub types: {result.TypesByAssembly.Sum(kv => kv.Value.Count)}");
         foreach (var (asm, types) in result.TypesByAssembly.OrderBy(kv => kv.Key))
