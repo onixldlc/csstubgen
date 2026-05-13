@@ -76,7 +76,7 @@ class Program
         Console.WriteLine($"\n[csstubgen] Found {analysis.CalledMethods.Count} unique method calls:\n");
         var buckets = verbose
             ? new[] { "bcl", "external", "self", "unresolved" }
-            : new[] { "external" };
+            : new string[] { };
         foreach (var bucket in buckets)
         {
             var methods = analysis.CalledMethods.Where(kv => kv.Value.StartsWith(bucket)).ToList();
@@ -93,7 +93,177 @@ class Program
             Console.WriteLine();
         }
 
+        // Print approximate stub signatures for each external method
+        var externalMethods = analysis.CalledMethods
+            .Where(kv => kv.Value.StartsWith("external"))
+            .ToList();
+
+        Console.WriteLine($"-- [stubs] ({externalMethods.Count}) --\n");
+        if (verbose)
+        {
+            foreach (var (method, _) in externalMethods)
+            {
+                if (analysis.MethodSignatures.TryGetValue(method, out var stub))
+                {
+                    Console.WriteLine($"    {method}:");
+                    Console.WriteLine($"    {stub}");
+                    Console.WriteLine();
+                }
+                else
+                {
+                    Console.WriteLine($"    {method}:");
+                    Console.WriteLine($"    // (unresolved signature)");
+                    Console.WriteLine();
+                }
+            }
+        }
+        else
+        {
+            Console.WriteLine($"    stub to build: {string.Join(", ", externalMethods.Select(kv => kv.Key))}");
+        }
+        Console.WriteLine();
+
+        // Print all types referenced in external method signatures, grouped by assembly
+        var totalTypes = analysis.ReferencedTypes.Values.Sum(s => s.Count);
+        Console.WriteLine($"-- [referenced types] ({totalTypes}) --\n");
+        if (verbose)
+        {
+            foreach (var (asm, types) in analysis.ReferencedTypes)
+            {
+                Console.WriteLine($"  [{asm}]");
+                foreach (var t in types)
+                    Console.WriteLine($"    {t}");
+                Console.WriteLine();
+            }
+        }
+        else
+        {
+            Console.WriteLine($"    {string.Join(", ", analysis.ReferencedTypes.Keys)}");
+        }
+        Console.WriteLine();
+
+        // Print class shells with stub methods grouped by declaring type
+        var classGroups = new SortedDictionary<string, (string typeName, string asm, List<string> stubs)>(StringComparer.Ordinal);
+        foreach (var (method, tag) in externalMethods)
+        {
+            if (!analysis.MethodSignatures.TryGetValue(method, out var stub)) continue;
+            var afterPipe = tag.Substring(tag.IndexOf('|') + 2).Trim();
+            var parenIdx = afterPipe.LastIndexOf('(');
+            var typeName = afterPipe.Substring(0, parenIdx).Trim();
+            var asmName = afterPipe.Substring(parenIdx + 1, afterPipe.Length - parenIdx - 2);
+            var key = $"{asmName}::{typeName}";
+            if (!classGroups.ContainsKey(key))
+                classGroups[key] = (typeName, asmName, new List<string>());
+            classGroups[key].stubs.Add(stub);
+        }
+
+        Console.WriteLine($"-- [class stubs] ({classGroups.Count}) --\n");
+        if (verbose)
+        {
+            string lastAsm = null;
+            foreach (var kv in classGroups)
+            {
+                var (typeName, asmName, stubs) = kv.Value;
+                if (asmName != lastAsm)
+                {
+                    if (lastAsm != null) Console.WriteLine();
+                    Console.WriteLine($"  // [{asmName}]");
+                    lastAsm = asmName;
+                }
+                var simpleName = typeName.Contains('.') ? typeName.Substring(typeName.LastIndexOf('.') + 1) : typeName;
+                var nameComment = typeName != simpleName ? $" // {typeName}" : "";
+                Console.WriteLine($"  public class {simpleName}{nameComment}");
+                Console.WriteLine($"  {{");
+                foreach (var stub in stubs)
+                    Console.WriteLine($"      {stub}");
+                Console.WriteLine($"  }}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"building ...");
+            Console.WriteLine($"done!");
+        }
+        Console.WriteLine();
+
+        // Print the .cs file content that would be written per assembly
+        var fileGroups = classGroups
+            .GroupBy(kv => kv.Value.asm)
+            .OrderBy(g => g.Key);
+
+        Console.WriteLine($"-- [generated .cs files] --\n");
+        if (verbose)
+        {
+            foreach (var asmGroup in fileGroups)
+            {
+                var asmName = asmGroup.Key;
+                Console.WriteLine($"  // ===== {asmName}.cs =====");
+                Console.WriteLine();
+
+                var allStubs = asmGroup.SelectMany(kv => kv.Value.stubs).ToList();
+                var usings = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (var stub in allStubs)
+                {
+                    foreach (var ns in ExtractNamespaces(stub))
+                        usings.Add(ns);
+                }
+                foreach (var u in usings)
+                    Console.WriteLine($"  using {u};");
+                if (usings.Count > 0) Console.WriteLine();
+
+                Console.WriteLine($"  namespace {asmName}");
+                Console.WriteLine($"  {{");
+                foreach (var kv in asmGroup)
+                {
+                    var (typeName, _, stubs) = kv.Value;
+                    var simpleName = typeName.Contains('.') ? typeName.Substring(typeName.LastIndexOf('.') + 1) : typeName;
+                    var nameComment = typeName != simpleName ? $" // {typeName}" : "";
+                    Console.WriteLine($"      public class {simpleName}{nameComment}");
+                    Console.WriteLine($"      {{");
+                    foreach (var stub in stubs)
+                        Console.WriteLine($"          {stub}");
+                    Console.WriteLine($"      }}");
+                    Console.WriteLine();
+                }
+                Console.WriteLine($"  }}");
+                Console.WriteLine();
+            }
+        }
+        else
+        {
+            Console.WriteLine($"building ...");
+            Console.WriteLine($"done!");
+        }
+        Console.WriteLine();
+
         return 0;
+    }
+
+    // Extract top-level namespaces from a stub signature string
+    static IEnumerable<string> ExtractNamespaces(string stub)
+    {
+        // Find all word sequences like Foo.Bar.Baz and return Foo.Bar (drop last segment = type name)
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var i = 0;
+        while (i < stub.Length)
+        {
+            // find start of a qualified name: uppercase letter preceded by non-identifier
+            if (char.IsUpper(stub[i]) && (i == 0 || !char.IsLetterOrDigit(stub[i - 1]) && stub[i - 1] != '.'))
+            {
+                var start = i;
+                while (i < stub.Length && (char.IsLetterOrDigit(stub[i]) || stub[i] == '.'))
+                    i++;
+                var name = stub.Substring(start, i - start);
+                var lastDot = name.LastIndexOf('.');
+                if (lastDot > 0)
+                {
+                    var ns = name.Substring(0, lastDot);
+                    if (seen.Add(ns)) yield return ns;
+                }
+                continue;
+            }
+            i++;
+        }
     }
 
     static IEnumerable<string> ResolveFiles(string path, string pattern)

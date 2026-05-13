@@ -18,6 +18,12 @@ public class AnalysisResult
 
     // All unique method/function calls found in source — tag: "bcl" | "external" | "unresolved"
     public SortedDictionary<string, string> CalledMethods { get; } = new(StringComparer.Ordinal);
+
+    // Approximate stub signature for resolved methods
+    public SortedDictionary<string, string> MethodSignatures { get; } = new(StringComparer.Ordinal);
+
+    // All types referenced in external method signatures, grouped by assembly
+    public SortedDictionary<string, SortedSet<string>> ReferencedTypes { get; } = new(StringComparer.Ordinal);
 }
 
 public static class SourceAnalyzer
@@ -109,10 +115,67 @@ public static class SourceAnalyzer
                 }
 
                 result.CalledMethods.Add(entry, tag);
+                if (symbol is IMethodSymbol ms)
+                {
+                    result.MethodSignatures[entry] = BuildStub(ms);
+                    if (tag.StartsWith("external"))
+                    {
+                        CollectTypes(ms.ReturnType, result.ReferencedTypes);
+                        foreach (var p in ms.Parameters)
+                            CollectTypes(p.Type, result.ReferencedTypes);
+                    }
+                }
             }
         }
 
         return result;
+    }
+
+    static string BuildStub(IMethodSymbol m)
+    {
+        var acc = m.DeclaredAccessibility switch
+        {
+            Accessibility.Public    => "public",
+            Accessibility.Protected => "protected",
+            Accessibility.Internal  => "internal",
+            _                       => "public"
+        };
+        var stat = m.IsStatic ? " static" : "";
+        var ret  = m.ReturnType.ToDisplayString();
+        var parms = string.Join(", ", m.Parameters.Select(p =>
+        {
+            var prefix = p.RefKind switch
+            {
+                RefKind.Ref  => "ref ",
+                RefKind.Out  => "out ",
+                RefKind.In   => "in ",
+                _            => ""
+            };
+            return $"{prefix}{p.Type.ToDisplayString()} {p.Name}";
+        }));
+        return $"{acc}{stat} {ret} {m.Name}({parms}) {{ throw new System.NotImplementedException(); }}";
+    }
+
+    static void CollectTypes(ITypeSymbol type, SortedDictionary<string, SortedSet<string>> dest)
+    {
+        if (type == null || type.SpecialType != SpecialType.None) return;
+        switch (type)
+        {
+            case IArrayTypeSymbol arr:
+                CollectTypes(arr.ElementType, dest);
+                return;
+            case INamedTypeSymbol named:
+            {
+                var asm = named.ContainingAssembly?.Name;
+                if (asm == null) return;
+                if (!dest.TryGetValue(asm, out var set))
+                    dest[asm] = set = new SortedSet<string>(StringComparer.Ordinal);
+                set.Add(named.ToDisplayString());
+                foreach (var ta in named.TypeArguments)
+                    CollectTypes(ta, dest);
+                break;
+            }
+        }
     }
 
     static bool IsFrameworkAssembly(string name) =>
