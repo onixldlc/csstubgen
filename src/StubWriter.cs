@@ -54,7 +54,7 @@ public static class StubWriter
             sb.AppendLine($"using {u};");
         sb.AppendLine();
 
-        sb.AppendLine($"namespace {asmName}");
+        sb.AppendLine($"namespace {asmName.Replace('-', '_')}");
         sb.AppendLine("{");
         foreach (var kv in types)
         {
