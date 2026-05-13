@@ -115,57 +115,67 @@ public static class StubWriter
 
         var memberIndent = indent + "    ";
 
-        // fields
-        foreach (var field in type.Fields.Where(f => f.IsPublic).OrderBy(f => f.Name))
+        if (type.IsEnum)
         {
-            if (!rt.NeededMembers.Contains(field.Name)) continue;
-            if (field.IsSpecialName) continue;
-
-            var fMods = field.IsStatic ? "public static" : "public";
-            sb.AppendLine($"{memberIndent}{fMods} {FormatTypeRef(field.FieldType)} {field.Name};");
-        }
-
-        // properties
-        foreach (var prop in type.Properties.OrderBy(p => p.Name))
-        {
-            if (!rt.NeededMembers.Contains(prop.Name)) continue;
-            var getter = prop.GetMethod;
-            var setter = prop.SetMethod;
-            if (getter == null && setter == null) continue;
-            if (getter != null && !getter.IsPublic && (setter == null || !setter.IsPublic)) continue;
-
-            var pMods = new List<string> { "public" };
-            if ((getter?.IsStatic ?? false) || (setter?.IsStatic ?? false))
-                pMods.Add("static");
-
-            var accessors = new List<string>();
-            if (getter != null) accessors.Add("get;");
-            if (setter != null)
+            // enum members use declaration syntax, not field syntax
+            var enumFields = type.Fields
+                .Where(f => f.IsPublic && f.IsStatic && f.IsLiteral && rt.NeededMembers.Contains(f.Name))
+                .OrderBy(f => f.Name)
+                .ToList();
+            for (int fi = 0; fi < enumFields.Count; fi++)
             {
-                if (setter.IsPublic) accessors.Add("set;");
-                else accessors.Add("private set;");
+                var sep = fi < enumFields.Count - 1 ? "," : "";
+                sb.AppendLine($"{memberIndent}{enumFields[fi].Name}{sep}");
+            }
+        }
+        else
+        {
+            // fields
+            foreach (var field in type.Fields.Where(f => f.IsPublic).OrderBy(f => f.Name))
+            {
+                if (!rt.NeededMembers.Contains(field.Name)) continue;
+                if (field.IsSpecialName) continue;
+
+                var fMods = field.IsStatic ? "public static" : "public";
+                sb.AppendLine($"{memberIndent}{fMods} {FormatTypeRef(field.FieldType)} {field.Name};");
             }
 
-            sb.AppendLine($"{memberIndent}{string.Join(" ", pMods)} {FormatTypeRef(prop.PropertyType)} {prop.Name} {{ {string.Join(" ", accessors)} }}");
-        }
+            // properties
+            foreach (var prop in type.Properties.OrderBy(p => p.Name))
+            {
+                if (!rt.NeededMembers.Contains(prop.Name)) continue;
+                var getter = prop.GetMethod;
+                var setter = prop.SetMethod;
+                if (getter == null && setter == null) continue;
+                if (getter != null && !getter.IsPublic && (setter == null || !setter.IsPublic)) continue;
 
-        // methods
-        foreach (var method in type.Methods.OrderBy(m => m.Name))
-        {
-            if (!method.IsPublic) continue;
-            if (method.IsConstructor) continue;
-            if (method.Name.StartsWith("get_") || method.Name.StartsWith("set_")) continue;
-            if (method.Name.StartsWith("add_") || method.Name.StartsWith("remove_")) continue;
-            if (!rt.NeededMembers.Contains(method.Name)) continue;
-            // skip compiler-generated
-            if (method.Name.Contains("<") || method.Name.Contains(">")) continue;
-            // skip Mirage-generated skeleton/usercode methods
-            if (method.Name.StartsWith("UserCode_") || method.Name.StartsWith("Skeleton_")) continue;
-            if (method.Name == "MirageProcessed") continue;
-            if (method.Name == "SerializeSyncVars" || method.Name == "DeserializeSyncVars") continue;
-            if (method.Name == "RegisterRpc" || method.Name == "GetRpcCount") continue;
+                var pMods = new List<string> { "public" };
+                if ((getter?.IsStatic ?? false) || (setter?.IsStatic ?? false))
+                    pMods.Add("static");
 
-            WriteMethod(sb, method, memberIndent);
+                var accessors = new List<string>();
+                if (getter != null) accessors.Add("get;");
+                if (setter != null)
+                {
+                    if (setter.IsPublic) accessors.Add("set;");
+                    else accessors.Add("private set;");
+                }
+
+                sb.AppendLine($"{memberIndent}{string.Join(" ", pMods)} {FormatTypeRef(prop.PropertyType)} {prop.Name} {{ {string.Join(" ", accessors)} }}");
+            }
+
+            // methods
+            foreach (var method in type.Methods.OrderBy(m => m.Name))
+            {
+                if (!method.IsPublic) continue;
+                if (method.IsConstructor) continue;
+                if (method.Name.StartsWith("get_") || method.Name.StartsWith("set_")) continue;
+                if (method.Name.StartsWith("add_") || method.Name.StartsWith("remove_")) continue;
+                if (!rt.NeededMembers.Contains(method.Name)) continue;
+                if (method.Name.Contains("<") || method.Name.Contains(">")) continue;
+
+                WriteMethod(sb, method, memberIndent);
+            }
         }
 
         sb.AppendLine($"{indent}}}");
@@ -292,6 +302,15 @@ public static class StubWriter
 
         if (type is GenericInstanceType genType)
         {
+            if (genType.ElementType.FullName == "System.Nullable`1")
+                return FormatTypeRef(genType.GenericArguments[0]) + "?";
+
+            if (genType.ElementType.FullName.StartsWith("System.ValueTuple`"))
+            {
+                var tupleArgs = string.Join(", ", genType.GenericArguments.Select(FormatTypeRef));
+                return $"({tupleArgs})";
+            }
+
             var baseName = StripGenericArity(genType.ElementType.Name);
             var args = string.Join(", ", genType.GenericArguments.Select(FormatTypeRef));
             return $"{baseName}<{args}>";
@@ -374,7 +393,7 @@ public static class StubWriter
         }
 
         var ns = type.Namespace;
-        if (!string.IsNullOrEmpty(ns) && ns != "System" && !ns.StartsWith("System."))
+        if (!string.IsNullOrEmpty(ns) && ns != "System")
             usings.Add(ns);
     }
 

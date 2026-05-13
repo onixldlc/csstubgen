@@ -106,6 +106,25 @@ public static class ReferenceResolver
         }
 
         // Layer 2: empty shell types (exist for stub compilation, no members)
+        ProcessShellQueue(shellQueue, processed, typeIndex, knownAssemblies, result);
+
+        // Layer 3: abstract overrides for stub→stub inheritance
+        AddAbstractOverrides(result);
+
+        // Layer 4: signature types for methods added by abstract overrides
+        var shellQueue2 = new Queue<string>();
+        foreach (var typeList in result.TypesByAssembly.Values)
+            foreach (var rt in typeList)
+                EnqueueShellDeps(rt.Definition, rt, shellQueue2, knownAssemblies, result, rt.AssemblyName);
+        ProcessShellQueue(shellQueue2, processed, typeIndex, knownAssemblies, result);
+
+        return result;
+    }
+
+    static void ProcessShellQueue(Queue<string> shellQueue, HashSet<string> processed,
+        Dictionary<string, List<(TypeDefinition Type, string Assembly)>> typeIndex,
+        HashSet<string> knownAssemblies, ResolverResult result)
+    {
         while (shellQueue.Count > 0)
         {
             var name = shellQueue.Dequeue();
@@ -135,11 +154,6 @@ public static class ReferenceResolver
                     result.AddDependency(asmName, baseScope);
             }
         }
-
-        // Layer 3: abstract overrides for stub→stub inheritance
-        AddAbstractOverrides(result);
-
-        return result;
     }
 
     static void EnqueueShellDeps(TypeDefinition typeDef, ResolvedType rt,
