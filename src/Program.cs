@@ -19,6 +19,7 @@ class Program
         var refPaths = new List<string>();
         var libPaths = new List<string>();
         string outDir = "./stubs";
+        bool verbose = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -38,6 +39,9 @@ class Program
                     break;
                 case "--unity-version":
                     if (++i < args.Length) { /* ignored */ }
+                    break;
+                case "-v" or "--verbose":
+                    verbose = true;
                     break;
             }
         }
@@ -62,41 +66,32 @@ class Program
             Console.Error.WriteLine("Error: no .cs files found in specified source paths");
             return 1;
         }
-        if (refDlls.Count == 0)
-        {
-            Console.Error.WriteLine("Error: no .dll files found in specified reference paths");
-            return 1;
-        }
 
         Console.WriteLine($"[csstubgen] Source files: {sourceFiles.Count}");
         foreach (var f in sourceFiles)
             Console.WriteLine($"  {f}");
-        Console.WriteLine($"[csstubgen] Reference DLLs: {refDlls.Count}");
-        foreach (var f in refDlls)
-            Console.WriteLine($"  {f}");
-        if (libDlls.Count > 0)
+
+        var analysis = SourceAnalyzer.Analyze(sourceFiles, refDlls.Concat(libDlls));
+
+        Console.WriteLine($"\n[csstubgen] Found {analysis.CalledMethods.Count} unique method calls:\n");
+        var buckets = verbose
+            ? new[] { "bcl", "external", "self", "unresolved" }
+            : new[] { "external" };
+        foreach (var bucket in buckets)
         {
-            Console.WriteLine($"[csstubgen] Library DLLs (analysis only): {libDlls.Count}");
-            foreach (var f in libDlls)
-                Console.WriteLine($"  {f}");
+            var methods = analysis.CalledMethods.Where(kv => kv.Value.StartsWith(bucket)).ToList();
+            if (methods.Count == 0) continue;
+
+            Console.WriteLine($"-- [{bucket}] ({methods.Count}) --");
+
+            foreach (var typeGroup in methods.GroupBy(kv => kv.Value).OrderBy(g => g.Key))
+            {
+                Console.WriteLine($"");
+                foreach (var (method, tag) in typeGroup.OrderBy(kv => kv.Key))
+                    Console.WriteLine($"    {method,-55} {tag}");
+            }
+            Console.WriteLine();
         }
-
-        var allDlls = refDlls.Concat(libDlls).ToList();
-        var analysis = SourceAnalyzer.Analyze(sourceFiles, allDlls);
-        Console.WriteLine($"[csstubgen] Types referenced: {analysis.TypeMembers.Count}");
-        Console.WriteLine($"[csstubgen] Types with members: {analysis.TypeMembers.Count(kv => kv.Value.Count > 0)}");
-        Console.WriteLine($"[csstubgen] Total member accesses: {analysis.TypeMembers.Sum(kv => kv.Value.Count)}");
-
-        Console.WriteLine("[csstubgen] Resolving:");
-        var result = ReferenceResolver.Resolve(analysis, refDlls);
-        Console.WriteLine($"[csstubgen] Stub types: {result.TypesByAssembly.Sum(kv => kv.Value.Count)}");
-        foreach (var (asm, types) in result.TypesByAssembly.OrderBy(kv => kv.Key))
-        {
-            Console.WriteLine($"  {asm}: {string.Join(", ", types.Select(t => t.Definition.Name).OrderBy(x => x))}");
-        }
-
-        StubWriter.Write(result, outDir);
-        Console.WriteLine($"[csstubgen] Stubs written to: {outDir}");
 
         return 0;
     }

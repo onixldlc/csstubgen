@@ -10,39 +10,14 @@ namespace CsStubGen;
 
 public class AnalysisResult
 {
+    // Preserved for future ReferenceResolver compatibility (not populated yet)
     public Dictionary<string, HashSet<string>> TypeMembers { get; } = new(StringComparer.Ordinal);
     public HashSet<string> Namespaces { get; } = new(StringComparer.Ordinal);
     public HashSet<string> BaseTypeNames { get; } = new(StringComparer.Ordinal);
-    // nameof(Type.Member) hints keyed by SHORT type name — resolved by ReferenceResolver
     public Dictionary<string, HashSet<string>> NameofHints { get; } = new(StringComparer.Ordinal);
 
-    public void AddMember(string typeFullName, string memberName)
-    {
-        if (string.IsNullOrEmpty(typeFullName) || string.IsNullOrEmpty(memberName)) return;
-        if (!TypeMembers.TryGetValue(typeFullName, out var set))
-        {
-            set = new HashSet<string>(StringComparer.Ordinal);
-            TypeMembers[typeFullName] = set;
-        }
-        set.Add(memberName);
-    }
-
-    public void AddNameofHint(string shortTypeName, string memberName)
-    {
-        if (string.IsNullOrEmpty(shortTypeName) || string.IsNullOrEmpty(memberName)) return;
-        if (!NameofHints.TryGetValue(shortTypeName, out var set))
-        {
-            set = new HashSet<string>(StringComparer.Ordinal);
-            NameofHints[shortTypeName] = set;
-        }
-        set.Add(memberName);
-    }
-
-    public void EnsureType(string typeFullName)
-    {
-        if (!string.IsNullOrEmpty(typeFullName) && !TypeMembers.ContainsKey(typeFullName))
-            TypeMembers[typeFullName] = new HashSet<string>(StringComparer.Ordinal);
-    }
+    // All unique method/function calls found in source — tag: "bcl" | "external" | "unresolved"
+    public SortedDictionary<string, string> CalledMethods { get; } = new(StringComparer.Ordinal);
 }
 
 public static class SourceAnalyzer
@@ -50,13 +25,14 @@ public static class SourceAnalyzer
     public static AnalysisResult Analyze(IEnumerable<string> sourceFiles, IEnumerable<string> allDlls)
     {
         var result = new AnalysisResult();
-
         var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
+        var dllList = allDlls.ToList();
+
         var trees = sourceFiles
             .Select(f => CSharpSyntaxTree.ParseText(File.ReadAllText(f), parseOptions, path: f))
             .ToList();
 
-        var refs = allDlls
+        var refs = dllList
             .Select(dll => (MetadataReference)MetadataReference.CreateFromFile(dll))
             .ToList();
 
@@ -64,131 +40,82 @@ public static class SourceAnalyzer
             syntaxTrees: trees,
             references: refs,
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                .WithAllowUnsafe(true));
-
-        var localTypes = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var tree in trees)
-        {
-            var model = compilation.GetSemanticModel(tree);
-            foreach (var td in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
-            {
-                var symbol = model.GetDeclaredSymbol(td);
-                if (symbol != null)
-                    localTypes.Add(GetFullName(symbol));
-            }
-        }
+                .WithAllowUnsafe(true)
+                .WithMetadataImportOptions(MetadataImportOptions.All));
 
         foreach (var tree in trees)
         {
             var model = compilation.GetSemanticModel(tree);
             var root = tree.GetRoot();
 
-            foreach (var u in root.DescendantNodes().OfType<UsingDirectiveSyntax>())
-            {
-                if (u.Name != null)
-                    result.Namespaces.Add(u.Name.ToString());
-            }
-
-            foreach (var bl in root.DescendantNodes().OfType<BaseListSyntax>())
-            {
-                foreach (var bt in bl.Types)
-                {
-                    var sym = model.GetTypeInfo(bt.Type).Type;
-                    if (sym != null && IsExternal(sym, localTypes))
-                    {
-                        var fn = GetFullName(sym);
-                        result.BaseTypeNames.Add(fn);
-                        result.EnsureType(fn);
-                    }
-                }
-            }
-
-            foreach (var node in root.DescendantNodes())
-            {
-                SymbolInfo? info = node switch
-                {
-                    MemberAccessExpressionSyntax => model.GetSymbolInfo(node),
-                    MemberBindingExpressionSyntax => model.GetSymbolInfo(node),
-                    _ => null
-                };
-
-                if (info is { } si)
-                {
-                    var symbol = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
-                    if (symbol?.ContainingType != null && IsExternal(symbol.ContainingType, localTypes))
-                        result.AddMember(GetFullName(symbol.ContainingType), symbol.Name);
-                }
-            }
-
-            // nameof(Type.Member) — semantic resolution is unreliable under high error counts;
-            // extract syntactically and let ReferenceResolver match by short name.
             foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
-                if (invocation.Expression is not IdentifierNameSyntax { Identifier.Text: "nameof" }) continue;
-                var arg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
-                if (arg is not MemberAccessExpressionSyntax ma) continue;
+                string entry = null;
+                string receiver = null;
 
-                var memberName = ma.Name.Identifier.Text;
-                // Extract the rightmost simple name from the type expression (handles Namespace.Type)
-                var shortTypeName = ma.Expression is MemberAccessExpressionSyntax nested
-                    ? nested.Name.Identifier.Text
-                    : ma.Expression is SimpleNameSyntax sn ? sn.Identifier.Text : ma.Expression.ToString();
-                result.AddNameofHint(shortTypeName, memberName);
+                switch (invocation.Expression)
+                {
+                    case MemberAccessExpressionSyntax ma:
+                    {
+                        var methodName = ma.Name.Identifier.Text;
+                        receiver = ma.Expression switch
+                        {
+                            IdentifierNameSyntax id                 => id.Identifier.Text,
+                            MemberAccessExpressionSyntax nested     => nested.Name.Identifier.Text,
+                            PredefinedTypeSyntax pre                => pre.Keyword.Text,
+                            BaseExpressionSyntax                    => "base",
+                            ThisExpressionSyntax                    => "this",
+                            _                                       => null
+                        };
+                        entry = receiver != null ? $"{receiver}.{methodName}" : methodName;
+                        break;
+                    }
+                    case MemberBindingExpressionSyntax mb:
+                        entry = mb.Name.Identifier.Text;
+                        break;
+                    case IdentifierNameSyntax id:
+                        entry = id.Identifier.Text;
+                        break;
+                    case GenericNameSyntax gn:
+                        entry = gn.Identifier.Text;
+                        break;
+                }
 
-                // Also try semantic path as a bonus
-                var si = model.GetSymbolInfo(ma);
-                var sym = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
-                if (sym?.ContainingType != null && IsExternal(sym.ContainingType, localTypes))
-                    result.AddMember(GetFullName(sym.ContainingType), memberName);
-            }
+                if (entry == null || result.CalledMethods.ContainsKey(entry)) continue;
 
-            foreach (var typeSyntax in root.DescendantNodes().OfType<TypeSyntax>())
-            {
-                if (typeSyntax is PredefinedTypeSyntax) continue;
-                if (typeSyntax is IdentifierNameSyntax idn && idn.Identifier.Text == "var") continue;
+                var si = model.GetSymbolInfo(invocation);
+                var symbol = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
 
-                var type = model.GetTypeInfo(typeSyntax).Type;
-                if (type != null && IsExternal(type, localTypes))
-                    result.EnsureType(GetFullName(type));
+                string tag;
+                if (symbol == null)
+                {
+                    tag = "unresolved";
+                }
+                else
+                {
+                    ITypeSymbol receiverType = null;
+                    if (invocation.Expression is MemberAccessExpressionSyntax ma2)
+                        receiverType = model.GetTypeInfo(ma2.Expression).Type;
+
+                    var resolvedAsm = receiverType?.ContainingAssembly ?? symbol.ContainingAssembly;
+                    var asmName = resolvedAsm?.Name ?? "";
+                    var typeName = receiverType?.ToDisplayString() ?? symbol.ContainingType?.ToDisplayString() ?? "?";
+
+                    var bucket = string.IsNullOrEmpty(asmName) ? "unresolved"
+                        : asmName == "StubAnalysis" ? "self"
+                        : IsFrameworkAssembly(asmName) ? "bcl" : "external";
+
+                    tag = $"{bucket} | {typeName} ({asmName})";
+                }
+
+                result.CalledMethods.Add(entry, tag);
             }
         }
-
-        var errors = compilation.GetDiagnostics()
-            .Count(d => d.Severity == DiagnosticSeverity.Error);
-        if (errors > 0)
-            Console.WriteLine($"[csstubgen] Note: compilation had {errors} errors (missing references? use --lib for non-stub DLLs)");
 
         return result;
     }
 
-    static bool IsExternal(ITypeSymbol type, HashSet<string> localTypes)
-    {
-        if (type.TypeKind == TypeKind.Error) return false;
-        if (type.SpecialType != SpecialType.None) return false;
-        if (localTypes.Contains(GetFullName(type))) return false;
-        return true;
-    }
-
-    static string GetFullName(ITypeSymbol type)
-    {
-        if (type is INamedTypeSymbol named && named.IsGenericType)
-            type = named.OriginalDefinition;
-
-        var parts = new List<string>();
-        parts.Add(type.Name);
-
-        var container = type.ContainingType;
-        while (container != null)
-        {
-            parts.Add(container.Name);
-            container = container.ContainingType;
-        }
-
-        var ns = type.ContainingNamespace;
-        if (ns != null && !ns.IsGlobalNamespace)
-            parts.Add(ns.ToDisplayString());
-
-        parts.Reverse();
-        return string.Join(".", parts);
-    }
+    static bool IsFrameworkAssembly(string name) =>
+        name == "mscorlib" || name == "netstandard" || name == "System.Private.CoreLib"
+        || name == "System" || name.StartsWith("System.") || name.StartsWith("Microsoft.CSharp");
 }

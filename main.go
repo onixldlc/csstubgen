@@ -213,6 +213,7 @@ func cmdDll(args []string) {
 func cmdGenerate(args []string) {
 	var name, outDir, unityVer, image string
 	var sources []string
+	var verbose bool
 	outDir = "./stubs"
 	unityVer = "2022.3.9"
 
@@ -233,9 +234,12 @@ func cmdGenerate(args []string) {
 		case "--image", "-i":
 			i++
 			image = args[i]
+		case "-v", "--verbose":
+			verbose = true
 		case "-h", "--help":
-			fmt.Println("Usage: csstubgen generate --name <name> [-s <source>...] [-o <output>] [--image <image>]")
+			fmt.Println("Usage: csstubgen generate --name <name> [-s <source>...] [-o <output>] [-v] [--image <image>]")
 			fmt.Println("  Omit --name to list available stripped DLL sets")
+			fmt.Println("  -v  show all buckets (bcl, self, unresolved) in addition to external")
 			return
 		default:
 			if !strings.HasPrefix(args[i], "-") {
@@ -275,6 +279,9 @@ func cmdGenerate(args []string) {
 		containerArgs = append(containerArgs, "-s", s)
 	}
 	containerArgs = append(containerArgs, "-r", "/ref", "-o", outDir, "--unity-version", unityVer)
+	if verbose {
+		containerArgs = append(containerArgs, "-v")
+	}
 
 	cmd := exec.Command(rt, containerArgs...)
 	cmd.Stdout = os.Stdout
