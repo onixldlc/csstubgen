@@ -17,6 +17,7 @@ class Program
 
         var sourcePaths = new List<string>();
         var refPaths = new List<string>();
+        var libPaths = new List<string>();
         string outDir = "./stubs";
         string unityVersion = "2022.3.9";
 
@@ -29,6 +30,9 @@ class Program
                     break;
                 case "-r" or "--ref":
                     if (++i < args.Length) refPaths.Add(args[i]);
+                    break;
+                case "-l" or "--lib":
+                    if (++i < args.Length) libPaths.Add(args[i]);
                     break;
                 case "-o" or "--out":
                     if (++i < args.Length) outDir = args[i];
@@ -52,6 +56,7 @@ class Program
 
         var sourceFiles = sourcePaths.SelectMany(p => ResolveFiles(p, "*.cs")).ToList();
         var refDlls = refPaths.SelectMany(p => ResolveFiles(p, "*.dll")).ToList();
+        var libDlls = libPaths.SelectMany(p => ResolveFiles(p, "*.dll")).ToList();
 
         if (sourceFiles.Count == 0)
         {
@@ -70,13 +75,20 @@ class Program
         Console.WriteLine($"[csstubgen] Reference DLLs: {refDlls.Count}");
         foreach (var f in refDlls)
             Console.WriteLine($"  {f}");
+        if (libDlls.Count > 0)
+        {
+            Console.WriteLine($"[csstubgen] Library DLLs (analysis only): {libDlls.Count}");
+            foreach (var f in libDlls)
+                Console.WriteLine($"  {f}");
+        }
 
-        var analysis = SourceAnalyzer.Analyze(sourceFiles);
-        Console.WriteLine($"[csstubgen] Referenced types: {string.Join(", ", analysis.TypeNames.OrderBy(x => x))}");
-        Console.WriteLine($"[csstubgen] Resolved member accesses: {analysis.TypeMembers.Sum(kv => kv.Value.Count)}");
-        Console.WriteLine($"[csstubgen] Unresolved members: {string.Join(", ", analysis.UnresolvedMembers.OrderBy(x => x))}");
+        var allDlls = refDlls.Concat(libDlls).ToList();
+        var analysis = SourceAnalyzer.Analyze(sourceFiles, allDlls);
+        Console.WriteLine($"[csstubgen] Types referenced: {analysis.TypeMembers.Count}");
+        Console.WriteLine($"[csstubgen] Types with members: {analysis.TypeMembers.Count(kv => kv.Value.Count > 0)}");
+        Console.WriteLine($"[csstubgen] Total member accesses: {analysis.TypeMembers.Sum(kv => kv.Value.Count)}");
 
-        Console.WriteLine("[csstubgen] Resolving members:");
+        Console.WriteLine("[csstubgen] Resolving:");
         var result = ReferenceResolver.Resolve(analysis, refDlls);
         Console.WriteLine($"[csstubgen] Stub types: {result.TypesByAssembly.Sum(kv => kv.Value.Count)}");
         foreach (var (asm, types) in result.TypesByAssembly.OrderBy(kv => kv.Key))
@@ -103,17 +115,18 @@ class Program
     {
         Console.WriteLine("csstubgen - Generate minimal C# stubs from source + reference DLLs");
         Console.WriteLine();
-        Console.WriteLine("Usage: csstubgen -s <source> -r <reference> [-o <output>]");
+        Console.WriteLine("Usage: csstubgen -s <source> -r <reference> [-l <library>] [-o <output>]");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  -s, --source <path>       Source .cs files or directory (required, repeatable)");
-        Console.WriteLine("  -r, --ref <path>          Reference DLL or directory (required, repeatable)");
+        Console.WriteLine("  -r, --ref <path>          Reference DLL or directory to generate stubs for (required, repeatable)");
+        Console.WriteLine("  -l, --lib <path>          Library DLL or directory for analysis only, no stubs (repeatable)");
         Console.WriteLine("  -o, --out <path>          Output directory (default: ./stubs)");
         Console.WriteLine("  --unity-version <ver>     UnityEngine.Modules NuGet version (default: 2022.3.9)");
         Console.WriteLine("  -h, --help                Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");
-        Console.WriteLine("  csstubgen -s ./MyMod.cs -r ./stripped/ -o ./stubs/");
-        Console.WriteLine("  csstubgen -s ./src/ -r ./Assembly-CSharp.dll -r ./Mirage.dll -o ./ci/stubs/");
+        Console.WriteLine("  csstubgen -s ./MyMod.cs -r ./Assembly-CSharp.dll -l ./Managed/ -o ./stubs/");
+        Console.WriteLine("  csstubgen -s ./src/ -r ./Assembly-CSharp.dll -r ./Mirage.dll -l ./BepInEx.dll -o ./stubs/");
     }
 }

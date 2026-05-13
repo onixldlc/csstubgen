@@ -42,15 +42,14 @@ public class ResolverResult
 
 public static class ReferenceResolver
 {
-    public static ResolverResult Resolve(SourceAnalyzer analysis, IEnumerable<string> refDlls)
+    public static ResolverResult Resolve(AnalysisResult analysis, IEnumerable<string> refDlls)
     {
         var result = new ResolverResult();
 
-        // global type index: typeName -> all candidates (handles name collisions)
         var typeIndex = new Dictionary<string, List<(TypeDefinition Type, string Assembly)>>(StringComparer.Ordinal);
         var assemblies = new List<AssemblyDefinition>();
         var knownAssemblies = new HashSet<string>(StringComparer.Ordinal);
-        var dllPaths = new Dictionary<string, string>(StringComparer.Ordinal); // asmName -> dll path
+        var dllPaths = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var dll in refDlls)
         {
@@ -63,37 +62,27 @@ public static class ReferenceResolver
             foreach (var type in asm.MainModule.Types)
             {
                 if (type.Name == "<Module>") continue;
-                var cleanName = StripGenericArity(type.Name);
-                AddToTypeIndex(typeIndex, cleanName, type, asmName);
+                AddToIndex(typeIndex, GetCecilKey(type), type, asmName);
 
                 foreach (var nested in type.NestedTypes)
-                {
-                    var nestedClean = StripGenericArity(nested.Name);
-                    AddToTypeIndex(typeIndex, nestedClean, nested, asmName);
-                }
+                    AddToIndex(typeIndex, GetCecilKey(nested), nested, asmName);
             }
         }
 
-        // track which types we've already processed
         var processed = new HashSet<string>(StringComparer.Ordinal);
-        var queue = new Queue<string>();
+        var shellQueue = new Queue<string>();
 
-        // seed queue with directly referenced types
-        foreach (var typeName in analysis.TypeNames)
+        // Layer 1: types + members directly used by source
+        foreach (var (typeFullName, members) in analysis.TypeMembers)
         {
-            if (ResolveFromIndex(typeIndex, typeName, analysis.Namespaces) != null)
-                queue.Enqueue(typeName);
-        }
+            if (processed.Contains(typeFullName)) continue;
+            processed.Add(typeFullName);
 
-        while (queue.Count > 0)
-        {
-            var name = queue.Dequeue();
-            if (processed.Contains(name)) continue;
-            processed.Add(name);
+            var entry = FindInIndex(typeIndex, typeFullName);
+            if (entry == null) continue;
+            var (typeDef, asmName) = entry.Value;
 
-            var resolved = ResolveFromIndex(typeIndex, name, analysis.Namespaces);
-            if (resolved == null) continue;
-            var (typeDef, asmName) = resolved.Value;
+            if (IsUnityAssembly(asmName) || IsFrameworkAssembly(asmName)) continue;
 
             var rt = new ResolvedType
             {
@@ -103,161 +92,183 @@ public static class ReferenceResolver
 
             var dllLabel = dllPaths.TryGetValue(asmName, out var dp) ? dp : asmName + ".dll";
 
-            // add explicitly mapped members
-            if (analysis.TypeMembers.TryGetValue(name, out var explicitMembers))
+            foreach (var m in members)
             {
-                foreach (var m in explicitMembers)
+                if (HasMember(typeDef, m))
                 {
                     rt.NeededMembers.Add(m);
-                    Console.WriteLine($"  {dllLabel} -> {typeDef.Name}.{m} ({GetMemberKind(typeDef, m)}) [explicit]");
+                    Console.WriteLine($"  {dllLabel} -> {typeDef.Name}.{m} ({GetMemberKind(typeDef, m)})");
                 }
             }
 
-            // add unresolved members that match any member on this type
-            foreach (var memberName in analysis.UnresolvedMembers)
+            result.AddType(rt);
+            EnqueueShellDeps(typeDef, rt, shellQueue, knownAssemblies, result, asmName);
+        }
+
+        // Layer 2: empty shell types (exist for stub compilation, no members)
+        while (shellQueue.Count > 0)
+        {
+            var name = shellQueue.Dequeue();
+            if (processed.Contains(name)) continue;
+            processed.Add(name);
+
+            var entry = FindInIndex(typeIndex, name);
+            if (entry == null) continue;
+            var (typeDef, asmName) = entry.Value;
+
+            if (IsUnityAssembly(asmName) || IsFrameworkAssembly(asmName)) continue;
+
+            var rt = new ResolvedType
             {
-                if (HasMember(typeDef, memberName))
-                {
-                    rt.NeededMembers.Add(memberName);
-                    Console.WriteLine($"  {dllLabel} -> {typeDef.Name}.{memberName} ({GetMemberKind(typeDef, memberName)}) [unresolved match]");
-                }
-            }
+                Definition = typeDef,
+                AssemblyName = asmName
+            };
 
-            // if abstract, include all abstract methods (required for subclass compilation)
-            if (typeDef.IsAbstract)
+            result.AddType(rt);
+
+            if (typeDef.BaseType != null && !IsTrivialBase(typeDef.BaseType))
             {
-                foreach (var method in typeDef.Methods)
-                {
-                    if (method.IsAbstract)
-                    {
-                        rt.NeededMembers.Add(method.Name);
-                        Console.WriteLine($"  {dllLabel} -> {typeDef.Name}.{method.Name} (method) [abstract]");
-                    }
-                }
-            }
+                shellQueue.Enqueue(GetCecilKey(typeDef.BaseType));
 
-            if (!IsUnityAssembly(asmName))
-                result.AddType(rt);
-
-            // walk dependencies (even for Unity types — need transitive resolution)
-
-            // base type
-            EnqueueBaseType(typeDef, queue, knownAssemblies, result, asmName);
-
-            // for needed fields: enqueue field types
-            foreach (var field in typeDef.Fields)
-            {
-                if (!field.IsPublic) continue;
-                if (!rt.NeededMembers.Contains(field.Name)) continue;
-                EnqueueTypeRef(field.FieldType, queue, knownAssemblies, result, asmName);
-            }
-
-            // for needed methods: enqueue parameter and return types
-            foreach (var method in typeDef.Methods)
-            {
-                if (!method.IsPublic) continue;
-                if (method.IsConstructor) continue;
-                if (!rt.NeededMembers.Contains(method.Name)) continue;
-
-                EnqueueTypeRef(method.ReturnType, queue, knownAssemblies, result, asmName);
-                foreach (var param in method.Parameters)
-                    EnqueueTypeRef(param.ParameterType, queue, knownAssemblies, result, asmName);
-            }
-
-            // for needed properties
-            foreach (var prop in typeDef.Properties)
-            {
-                if (!rt.NeededMembers.Contains(prop.Name)) continue;
-                EnqueueTypeRef(prop.PropertyType, queue, knownAssemblies, result, asmName);
-            }
-
-            // interfaces: only if directly referenced in source
-            foreach (var iface in typeDef.Interfaces)
-            {
-                var ifaceName = GetSimpleTypeName(iface.InterfaceType);
-                if (analysis.TypeNames.Contains(ifaceName))
-                    queue.Enqueue(ifaceName);
+                var baseScope = GetAssemblyScope(typeDef.BaseType);
+                if (baseScope != null && knownAssemblies.Contains(baseScope) && baseScope != asmName)
+                    result.AddDependency(asmName, baseScope);
             }
         }
 
-        // second pass: for types extending abstract base types in our stubs,
-        // ensure abstract method overrides are included
-        AddAbstractOverrides(result, typeIndex, analysis.Namespaces);
+        // Layer 3: abstract overrides for stub→stub inheritance
+        AddAbstractOverrides(result);
 
         return result;
     }
 
-    static void AddAbstractOverrides(ResolverResult result,
-        Dictionary<string, List<(TypeDefinition Type, string Assembly)>> typeIndex,
-        HashSet<string> sourceNamespaces)
+    static void EnqueueShellDeps(TypeDefinition typeDef, ResolvedType rt,
+        Queue<string> shellQueue, HashSet<string> knownAssemblies,
+        ResolverResult result, string asmName)
+    {
+        if (typeDef.BaseType != null && !IsTrivialBase(typeDef.BaseType))
+        {
+            shellQueue.Enqueue(GetCecilKey(typeDef.BaseType));
+
+            var baseScope = GetAssemblyScope(typeDef.BaseType);
+            if (baseScope != null && knownAssemblies.Contains(baseScope) && baseScope != asmName)
+                result.AddDependency(asmName, baseScope);
+        }
+
+        foreach (var field in typeDef.Fields)
+        {
+            if (!field.IsPublic || !rt.NeededMembers.Contains(field.Name)) continue;
+            EnqueueSignatureType(field.FieldType, shellQueue, knownAssemblies, result, asmName);
+        }
+
+        foreach (var method in typeDef.Methods)
+        {
+            if (!method.IsPublic || method.IsConstructor || !rt.NeededMembers.Contains(method.Name)) continue;
+            EnqueueSignatureType(method.ReturnType, shellQueue, knownAssemblies, result, asmName);
+            foreach (var p in method.Parameters)
+                EnqueueSignatureType(p.ParameterType, shellQueue, knownAssemblies, result, asmName);
+        }
+
+        foreach (var prop in typeDef.Properties)
+        {
+            if (!rt.NeededMembers.Contains(prop.Name)) continue;
+            EnqueueSignatureType(prop.PropertyType, shellQueue, knownAssemblies, result, asmName);
+        }
+    }
+
+    static void EnqueueSignatureType(TypeReference typeRef, Queue<string> shellQueue,
+        HashSet<string> knownAssemblies, ResolverResult result, string currentAssembly)
+    {
+        if (typeRef == null || typeRef is GenericParameter) return;
+
+        if (typeRef is GenericInstanceType gen)
+        {
+            EnqueueSignatureType(gen.ElementType, shellQueue, knownAssemblies, result, currentAssembly);
+            foreach (var arg in gen.GenericArguments)
+                EnqueueSignatureType(arg, shellQueue, knownAssemblies, result, currentAssembly);
+            return;
+        }
+
+        if (typeRef is ArrayType arr)
+        {
+            EnqueueSignatureType(arr.ElementType, shellQueue, knownAssemblies, result, currentAssembly);
+            return;
+        }
+
+        if (typeRef is ByReferenceType byRef)
+        {
+            EnqueueSignatureType(byRef.ElementType, shellQueue, knownAssemblies, result, currentAssembly);
+            return;
+        }
+
+        var ns = typeRef.Namespace ?? "";
+        if (ns == "System" || ns.StartsWith("System.")) return;
+
+        var scope = GetAssemblyScope(typeRef);
+        if (scope != null && knownAssemblies.Contains(scope) && scope != currentAssembly)
+            result.AddDependency(currentAssembly, scope);
+
+        shellQueue.Enqueue(GetCecilKey(typeRef));
+    }
+
+    static void AddAbstractOverrides(ResolverResult result)
     {
         var allStubTypes = result.TypesByAssembly.Values.SelectMany(x => x).ToList();
-        var stubTypeNames = new HashSet<string>(allStubTypes.Select(t => StripGenericArity(t.Definition.Name)));
+        var stubByKey = new Dictionary<string, ResolvedType>(StringComparer.Ordinal);
+        foreach (var rt in allStubTypes)
+            stubByKey.TryAdd(GetCecilKey(rt.Definition), rt);
 
         foreach (var rt in allStubTypes)
         {
-            var baseType = rt.Definition.BaseType;
-            while (baseType != null)
+            var baseRef = rt.Definition.BaseType;
+            while (baseRef != null)
             {
-                var baseName = GetSimpleTypeName(baseType);
-                if (!stubTypeNames.Contains(baseName)) break;
+                var baseName = GetCecilKey(baseRef);
+                if (!stubByKey.TryGetValue(baseName, out var baseStub)) break;
 
-                var baseResolved = ResolveFromIndex(typeIndex, baseName, sourceNamespaces);
-                if (baseResolved != null && baseResolved.Value.Type.IsAbstract)
+                if (baseStub.Definition.IsAbstract)
                 {
-                    foreach (var method in baseResolved.Value.Type.Methods)
+                    foreach (var method in baseStub.Definition.Methods)
                     {
-                        if (method.IsAbstract)
-                        {
-                            // find the override in current type
-                            var overrideMethod = rt.Definition.Methods
-                                .FirstOrDefault(m => m.Name == method.Name
-                                    && m.IsVirtual && !m.IsNewSlot);
-                            if (overrideMethod != null)
-                                rt.NeededMembers.Add(overrideMethod.Name);
-                        }
+                        if (!method.IsAbstract) continue;
+
+                        baseStub.NeededMembers.Add(method.Name);
+
+                        var overrideMethod = rt.Definition.Methods
+                            .FirstOrDefault(m => m.Name == method.Name
+                                && m.IsVirtual && !m.IsNewSlot);
+                        if (overrideMethod != null)
+                            rt.NeededMembers.Add(overrideMethod.Name);
                     }
                 }
 
-                // walk up
-                var walkResolved = ResolveFromIndex(typeIndex, baseName, sourceNamespaces);
-                if (walkResolved != null)
-                    baseType = walkResolved.Value.Type.BaseType;
-                else
-                    break;
+                try { baseRef = baseStub.Definition.BaseType; }
+                catch { break; }
             }
         }
     }
 
-    static void AddToTypeIndex(Dictionary<string, List<(TypeDefinition Type, string Assembly)>> index,
-        string name, TypeDefinition type, string assembly)
+    static void AddToIndex(Dictionary<string, List<(TypeDefinition, string)>> index,
+        string key, TypeDefinition type, string assembly)
     {
-        if (!index.TryGetValue(name, out var candidates))
+        if (!index.TryGetValue(key, out var list))
         {
-            candidates = new List<(TypeDefinition, string)>();
-            index[name] = candidates;
+            list = new List<(TypeDefinition, string)>();
+            index[key] = list;
         }
-        candidates.Add((type, assembly));
+        list.Add((type, assembly));
     }
 
-    static (TypeDefinition Type, string Assembly)? ResolveFromIndex(
+    static (TypeDefinition Type, string Assembly)? FindInIndex(
         Dictionary<string, List<(TypeDefinition Type, string Assembly)>> index,
-        string name, HashSet<string> sourceNamespaces)
+        string key)
     {
-        if (!index.TryGetValue(name, out var candidates) || candidates.Count == 0)
+        if (!index.TryGetValue(key, out var candidates) || candidates.Count == 0)
             return null;
 
         if (candidates.Count == 1)
             return candidates[0];
 
-        // prefer type whose namespace matches a using directive from source
-        foreach (var c in candidates)
-        {
-            if (sourceNamespaces.Contains(c.Type.Namespace ?? ""))
-                return c;
-        }
-
-        // prefer non-System/non-Mono types (likely game assemblies)
         foreach (var c in candidates)
         {
             var ns = c.Type.Namespace ?? "";
@@ -268,48 +279,43 @@ public static class ReferenceResolver
         return candidates[0];
     }
 
-    static void EnqueueBaseType(TypeDefinition type, Queue<string> queue,
-        HashSet<string> knownAssemblies, ResolverResult result, string currentAssembly)
+    static string GetCecilKey(TypeReference type)
     {
-        if (type.BaseType == null) return;
-        var baseName = GetSimpleTypeName(type.BaseType);
-        if (baseName == "Object" || baseName == "ValueType" || baseName == "Enum") return;
+        if (type is GenericInstanceType gen)
+            type = gen.ElementType;
+        if (type is ByReferenceType byRef)
+            type = byRef.ElementType;
+        if (type is ArrayType arr)
+            type = arr.ElementType;
 
-        var baseScope = GetAssemblyScope(type.BaseType);
-        if (baseScope != null && knownAssemblies.Contains(baseScope) && baseScope != currentAssembly)
-            result.AddDependency(currentAssembly, baseScope);
+        var name = StripGenericArity(type.Name);
 
-        queue.Enqueue(baseName);
+        if (type.IsNested && type.DeclaringType != null)
+        {
+            var parent = StripGenericArity(type.DeclaringType.Name);
+            var ns = type.DeclaringType.Namespace;
+            if (string.IsNullOrEmpty(ns))
+                return parent + "." + name;
+            return ns + "." + parent + "." + name;
+        }
+
+        if (string.IsNullOrEmpty(type.Namespace))
+            return name;
+        return type.Namespace + "." + name;
     }
 
-    static void EnqueueTypeRef(TypeReference typeRef, Queue<string> queue,
-        HashSet<string> knownAssemblies, ResolverResult result, string currentAssembly)
+    static string StripGenericArity(string name)
     {
-        if (typeRef == null) return;
+        var tick = name.IndexOf('`');
+        return tick >= 0 ? name.Substring(0, tick) : name;
+    }
 
-        var name = GetSimpleTypeName(typeRef);
-        if (IsFrameworkType(name)) return;
-
-        var scope = GetAssemblyScope(typeRef);
-        if (scope != null && knownAssemblies.Contains(scope) && scope != currentAssembly)
-            result.AddDependency(currentAssembly, scope);
-
-        queue.Enqueue(name);
-
-        // recurse into generic arguments
-        if (typeRef is GenericInstanceType gen)
-        {
-            foreach (var arg in gen.GenericArguments)
-                EnqueueTypeRef(arg, queue, knownAssemblies, result, currentAssembly);
-        }
-        else if (typeRef is ArrayType arr)
-        {
-            EnqueueTypeRef(arr.ElementType, queue, knownAssemblies, result, currentAssembly);
-        }
-        else if (typeRef is ByReferenceType byRef)
-        {
-            EnqueueTypeRef(byRef.ElementType, queue, knownAssemblies, result, currentAssembly);
-        }
+    static string GetAssemblyScope(TypeReference type)
+    {
+        if (type is GenericInstanceType gen)
+            return GetAssemblyScope(gen.ElementType);
+        return (type.Scope as AssemblyNameReference)?.Name
+            ?? (type.Scope as ModuleDefinition)?.Assembly?.Name?.Name;
     }
 
     static bool HasMember(TypeDefinition type, string name)
@@ -327,25 +333,10 @@ public static class ReferenceResolver
         return "member";
     }
 
-    static string GetSimpleTypeName(TypeReference type)
+    static bool IsTrivialBase(TypeReference baseType)
     {
-        if (type is GenericInstanceType gen)
-            return StripGenericArity(gen.ElementType.Name);
-        return StripGenericArity(type.Name);
-    }
-
-    static string StripGenericArity(string name)
-    {
-        var tick = name.IndexOf('`');
-        return tick >= 0 ? name.Substring(0, tick) : name;
-    }
-
-    static string GetAssemblyScope(TypeReference type)
-    {
-        if (type is GenericInstanceType gen)
-            return GetAssemblyScope(gen.ElementType);
-        return (type.Scope as AssemblyNameReference)?.Name
-            ?? (type.Scope as ModuleDefinition)?.Assembly?.Name?.Name;
+        var fn = baseType.FullName;
+        return fn == "System.Object" || fn == "System.ValueType" || fn == "System.Enum";
     }
 
     static bool IsUnityAssembly(string assemblyName)
@@ -353,14 +344,11 @@ public static class ReferenceResolver
         return assemblyName == "UnityEngine" || assemblyName.StartsWith("UnityEngine.");
     }
 
-    static bool IsFrameworkType(string name)
+    static bool IsFrameworkAssembly(string assemblyName)
     {
-        return name switch
-        {
-            "Object" or "String" or "Boolean" or "Int32" or "Int64" or "Single"
-            or "Double" or "Byte" or "Void" or "ValueType" or "Enum" or "Type"
-            or "Action" or "Func" or "Task" or "Nullable" => true,
-            _ => false
-        };
+        return assemblyName == "mscorlib"
+            || assemblyName == "netstandard"
+            || assemblyName == "System"
+            || assemblyName.StartsWith("System.");
     }
 }

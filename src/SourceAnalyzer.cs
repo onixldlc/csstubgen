@@ -8,259 +8,152 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace CsStubGen;
 
-public class SourceAnalyzer : CSharpSyntaxWalker
+public class AnalysisResult
 {
-    public HashSet<string> TypeNames { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, HashSet<string>> TypeMembers { get; } = new(StringComparer.Ordinal);
-    public HashSet<string> UnresolvedMembers { get; } = new(StringComparer.Ordinal);
     public HashSet<string> Namespaces { get; } = new(StringComparer.Ordinal);
+    public HashSet<string> BaseTypeNames { get; } = new(StringComparer.Ordinal);
 
-    private readonly Dictionary<string, string> _varTypes = new(StringComparer.Ordinal);
-
-    // types declared in the source itself (these are NOT external)
-    private readonly HashSet<string> _localTypes = new(StringComparer.Ordinal);
-
-    public static SourceAnalyzer Analyze(IEnumerable<string> sourceFiles)
+    public void AddMember(string typeFullName, string memberName)
     {
-        var analyzer = new SourceAnalyzer();
-        foreach (var file in sourceFiles)
-        {
-            var code = File.ReadAllText(file);
-            var tree = CSharpSyntaxTree.ParseText(code);
-            // first pass: collect local type declarations
-            foreach (var typeDecl in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
-                analyzer._localTypes.Add(typeDecl.Identifier.Text);
-            // second pass: collect references
-            analyzer.Visit(tree.GetRoot());
-        }
-        // remove locally declared types from external references
-        foreach (var local in analyzer._localTypes)
-            analyzer.TypeNames.Remove(local);
-        return analyzer;
-    }
-
-    void AddType(string name)
-    {
-        if (!string.IsNullOrEmpty(name) && !IsBuiltinType(name))
-            TypeNames.Add(name);
-    }
-
-    void AddTypeMember(string typeName, string memberName)
-    {
-        if (string.IsNullOrEmpty(typeName) || string.IsNullOrEmpty(memberName)) return;
-        if (!TypeMembers.TryGetValue(typeName, out var set))
+        if (string.IsNullOrEmpty(typeFullName) || string.IsNullOrEmpty(memberName)) return;
+        if (!TypeMembers.TryGetValue(typeFullName, out var set))
         {
             set = new HashSet<string>(StringComparer.Ordinal);
-            TypeMembers[typeName] = set;
+            TypeMembers[typeFullName] = set;
         }
         set.Add(memberName);
     }
 
-    static bool IsBuiltinType(string name)
+    public void EnsureType(string typeFullName)
     {
-        return name switch
-        {
-            "void" or "bool" or "byte" or "sbyte" or "char" or "short" or "ushort"
-            or "int" or "uint" or "long" or "ulong" or "float" or "double" or "decimal"
-            or "string" or "object" or "var" or "dynamic" or "nint" or "nuint" => true,
-            _ => false
-        };
+        if (!string.IsNullOrEmpty(typeFullName) && !TypeMembers.ContainsKey(typeFullName))
+            TypeMembers[typeFullName] = new HashSet<string>(StringComparer.Ordinal);
     }
+}
 
-    string ExtractTypeName(TypeSyntax type)
+public static class SourceAnalyzer
+{
+    public static AnalysisResult Analyze(IEnumerable<string> sourceFiles, IEnumerable<string> allDlls)
     {
-        return type switch
+        var result = new AnalysisResult();
+
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
+        var trees = sourceFiles
+            .Select(f => CSharpSyntaxTree.ParseText(File.ReadAllText(f), parseOptions, path: f))
+            .ToList();
+
+        var refs = allDlls
+            .Select(dll => (MetadataReference)MetadataReference.CreateFromFile(dll))
+            .ToList();
+
+        var compilation = CSharpCompilation.Create("StubAnalysis",
+            syntaxTrees: trees,
+            references: refs,
+            options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+                .WithAllowUnsafe(true));
+
+        var localTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tree in trees)
         {
-            IdentifierNameSyntax id => id.Identifier.Text,
-            GenericNameSyntax gen => gen.Identifier.Text,
-            QualifiedNameSyntax qual => qual.Right.Identifier.Text,
-            NullableTypeSyntax nullable => ExtractTypeName(nullable.ElementType),
-            ArrayTypeSyntax array => ExtractTypeName(array.ElementType),
-            PredefinedTypeSyntax _ => null,
-            _ => null
-        };
-    }
-
-    void AddTypeFromSyntax(TypeSyntax type)
-    {
-        if (type == null) return;
-
-        switch (type)
-        {
-            case IdentifierNameSyntax id:
-                AddType(id.Identifier.Text);
-                break;
-            case GenericNameSyntax gen:
-                AddType(gen.Identifier.Text);
-                foreach (var arg in gen.TypeArgumentList.Arguments)
-                    AddTypeFromSyntax(arg);
-                break;
-            case QualifiedNameSyntax qual:
-                AddType(qual.Right.Identifier.Text);
-                // left part might be a namespace
-                if (qual.Left is IdentifierNameSyntax ns)
-                    Namespaces.Add(ns.Identifier.Text);
-                break;
-            case NullableTypeSyntax nullable:
-                AddTypeFromSyntax(nullable.ElementType);
-                break;
-            case ArrayTypeSyntax array:
-                AddTypeFromSyntax(array.ElementType);
-                break;
-        }
-    }
-
-    string ResolveExpressionType(ExpressionSyntax expr)
-    {
-        switch (expr)
-        {
-            case IdentifierNameSyntax id:
-                if (_varTypes.TryGetValue(id.Identifier.Text, out var varType))
-                    return varType;
-                return id.Identifier.Text;
-
-            case GenericNameSyntax gen:
-                foreach (var arg in gen.TypeArgumentList.Arguments)
-                    AddTypeFromSyntax(arg);
-                return gen.Identifier.Text;
-
-            case ParenthesizedExpressionSyntax paren:
-                return ResolveExpressionType(paren.Expression);
-
-            case CastExpressionSyntax cast:
-                AddTypeFromSyntax(cast.Type);
-                return ExtractTypeName(cast.Type);
-
-            default:
-                return null;
-        }
-    }
-
-    // --- Visitors ---
-
-    public override void VisitUsingDirective(UsingDirectiveSyntax node)
-    {
-        if (node.Name != null)
-            Namespaces.Add(node.Name.ToString());
-        base.VisitUsingDirective(node);
-    }
-
-    public override void VisitParameter(ParameterSyntax node)
-    {
-        if (node.Type != null)
-        {
-            AddTypeFromSyntax(node.Type);
-            var typeName = ExtractTypeName(node.Type);
-            if (typeName != null && node.Identifier.Text.Length > 0)
-                _varTypes[node.Identifier.Text] = typeName;
-        }
-        base.VisitParameter(node);
-    }
-
-    public override void VisitVariableDeclaration(VariableDeclarationSyntax node)
-    {
-        if (node.Type != null && !node.Type.IsVar)
-        {
-            AddTypeFromSyntax(node.Type);
-            var typeName = ExtractTypeName(node.Type);
-            if (typeName != null)
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var td in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
-                foreach (var v in node.Variables)
-                    _varTypes[v.Identifier.Text] = typeName;
+                var symbol = model.GetDeclaredSymbol(td);
+                if (symbol != null)
+                    localTypes.Add(GetFullName(symbol));
             }
         }
-        base.VisitVariableDeclaration(node);
-    }
 
-    public override void VisitBaseList(BaseListSyntax node)
-    {
-        foreach (var baseType in node.Types)
-            AddTypeFromSyntax(baseType.Type);
-        base.VisitBaseList(node);
-    }
-
-    public override void VisitTypeOfExpression(TypeOfExpressionSyntax node)
-    {
-        AddTypeFromSyntax(node.Type);
-        base.VisitTypeOfExpression(node);
-    }
-
-    public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
-    {
-        if (node.Type != null)
-            AddTypeFromSyntax(node.Type);
-        base.VisitObjectCreationExpression(node);
-    }
-
-    public override void VisitCastExpression(CastExpressionSyntax node)
-    {
-        AddTypeFromSyntax(node.Type);
-        base.VisitCastExpression(node);
-    }
-
-    public override void VisitGenericName(GenericNameSyntax node)
-    {
-        AddType(node.Identifier.Text);
-        foreach (var arg in node.TypeArgumentList.Arguments)
-            AddTypeFromSyntax(arg);
-        base.VisitGenericName(node);
-    }
-
-    public override void VisitInvocationExpression(InvocationExpressionSyntax node)
-    {
-        // handle nameof(Type.Member)
-        if (node.Expression is IdentifierNameSyntax id && id.Identifier.Text == "nameof"
-            && node.ArgumentList.Arguments.Count == 1)
+        foreach (var tree in trees)
         {
-            var arg = node.ArgumentList.Arguments[0].Expression;
-            if (arg is MemberAccessExpressionSyntax ma)
+            var model = compilation.GetSemanticModel(tree);
+            var root = tree.GetRoot();
+
+            foreach (var u in root.DescendantNodes().OfType<UsingDirectiveSyntax>())
             {
-                var typeName = ResolveExpressionType(ma.Expression);
-                if (typeName != null)
+                if (u.Name != null)
+                    result.Namespaces.Add(u.Name.ToString());
+            }
+
+            foreach (var bl in root.DescendantNodes().OfType<BaseListSyntax>())
+            {
+                foreach (var bt in bl.Types)
                 {
-                    AddType(typeName);
-                    AddTypeMember(typeName, ma.Name.Identifier.Text);
+                    var sym = model.GetTypeInfo(bt.Type).Type;
+                    if (sym != null && IsExternal(sym, localTypes))
+                    {
+                        var fn = GetFullName(sym);
+                        result.BaseTypeNames.Add(fn);
+                        result.EnsureType(fn);
+                    }
                 }
             }
+
+            foreach (var node in root.DescendantNodes())
+            {
+                SymbolInfo? info = node switch
+                {
+                    MemberAccessExpressionSyntax => model.GetSymbolInfo(node),
+                    MemberBindingExpressionSyntax => model.GetSymbolInfo(node),
+                    _ => null
+                };
+
+                if (info is { } si)
+                {
+                    var symbol = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
+                    if (symbol?.ContainingType != null && IsExternal(symbol.ContainingType, localTypes))
+                        result.AddMember(GetFullName(symbol.ContainingType), symbol.Name);
+                }
+            }
+
+            foreach (var typeSyntax in root.DescendantNodes().OfType<TypeSyntax>())
+            {
+                if (typeSyntax is PredefinedTypeSyntax) continue;
+                if (typeSyntax is IdentifierNameSyntax idn && idn.Identifier.Text == "var") continue;
+
+                var type = model.GetTypeInfo(typeSyntax).Type;
+                if (type != null && IsExternal(type, localTypes))
+                    result.EnsureType(GetFullName(type));
+            }
         }
-        base.VisitInvocationExpression(node);
+
+        var errors = compilation.GetDiagnostics()
+            .Count(d => d.Severity == DiagnosticSeverity.Error);
+        if (errors > 0)
+            Console.WriteLine($"[csstubgen] Note: compilation had {errors} errors (missing references? use --lib for non-stub DLLs)");
+
+        return result;
     }
 
-    public override void VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
+    static bool IsExternal(ITypeSymbol type, HashSet<string> localTypes)
     {
-        var memberName = node.Name.Identifier.Text;
-        var typeName = ResolveExpressionType(node.Expression);
-
-        if (typeName != null)
-            AddTypeMember(typeName, memberName);
-        else
-            UnresolvedMembers.Add(memberName);
-
-        base.VisitMemberAccessExpression(node);
+        if (type.TypeKind == TypeKind.Error) return false;
+        if (type.SpecialType != SpecialType.None) return false;
+        if (localTypes.Contains(GetFullName(type))) return false;
+        return true;
     }
 
-    public override void VisitMemberBindingExpression(MemberBindingExpressionSyntax node)
+    static string GetFullName(ITypeSymbol type)
     {
-        // handles ?.member — can't resolve type from syntax alone
-        UnresolvedMembers.Add(node.Name.Identifier.Text);
-        base.VisitMemberBindingExpression(node);
-    }
+        if (type is INamedTypeSymbol named && named.IsGenericType)
+            type = named.OriginalDefinition;
 
-    public override void VisitFieldDeclaration(FieldDeclarationSyntax node)
-    {
-        AddTypeFromSyntax(node.Declaration.Type);
-        base.VisitFieldDeclaration(node);
-    }
+        var parts = new List<string>();
+        parts.Add(type.Name);
 
-    public override void VisitPropertyDeclaration(PropertyDeclarationSyntax node)
-    {
-        AddTypeFromSyntax(node.Type);
-        base.VisitPropertyDeclaration(node);
-    }
+        var container = type.ContainingType;
+        while (container != null)
+        {
+            parts.Add(container.Name);
+            container = container.ContainingType;
+        }
 
-    public override void VisitMethodDeclaration(MethodDeclarationSyntax node)
-    {
-        AddTypeFromSyntax(node.ReturnType);
-        base.VisitMethodDeclaration(node);
+        var ns = type.ContainingNamespace;
+        if (ns != null && !ns.IsGlobalNamespace)
+            parts.Add(ns.ToDisplayString());
+
+        parts.Reverse();
+        return string.Join(".", parts);
     }
 }
