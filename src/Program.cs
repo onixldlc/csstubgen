@@ -236,35 +236,13 @@ class Program
         }
         Console.WriteLine();
 
+        StubWriter.Write(classGroups, outDir);
+
         return 0;
     }
 
-    // Extract top-level namespaces from a stub signature string
     static IEnumerable<string> ExtractNamespaces(string stub)
-    {
-        // Find all word sequences like Foo.Bar.Baz and return Foo.Bar (drop last segment = type name)
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var i = 0;
-        while (i < stub.Length)
-        {
-            // find start of a qualified name: uppercase letter preceded by non-identifier
-            if (char.IsUpper(stub[i]) && (i == 0 || !char.IsLetterOrDigit(stub[i - 1]) && stub[i - 1] != '.'))
-            {
-                var start = i;
-                while (i < stub.Length && (char.IsLetterOrDigit(stub[i]) || stub[i] == '.'))
-                    i++;
-                var name = stub.Substring(start, i - start);
-                var lastDot = name.LastIndexOf('.');
-                if (lastDot > 0)
-                {
-                    var ns = name.Substring(0, lastDot);
-                    if (seen.Add(ns)) yield return ns;
-                }
-                continue;
-            }
-            i++;
-        }
-    }
+        => StubWriter.ExtractNamespaces(stub);
 
     static IEnumerable<string> ResolveFiles(string path, string pattern)
     {
