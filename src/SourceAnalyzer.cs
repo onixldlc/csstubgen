@@ -13,6 +13,8 @@ public class AnalysisResult
     public Dictionary<string, HashSet<string>> TypeMembers { get; } = new(StringComparer.Ordinal);
     public HashSet<string> Namespaces { get; } = new(StringComparer.Ordinal);
     public HashSet<string> BaseTypeNames { get; } = new(StringComparer.Ordinal);
+    // nameof(Type.Member) hints keyed by SHORT type name — resolved by ReferenceResolver
+    public Dictionary<string, HashSet<string>> NameofHints { get; } = new(StringComparer.Ordinal);
 
     public void AddMember(string typeFullName, string memberName)
     {
@@ -21,6 +23,17 @@ public class AnalysisResult
         {
             set = new HashSet<string>(StringComparer.Ordinal);
             TypeMembers[typeFullName] = set;
+        }
+        set.Add(memberName);
+    }
+
+    public void AddNameofHint(string shortTypeName, string memberName)
+    {
+        if (string.IsNullOrEmpty(shortTypeName) || string.IsNullOrEmpty(memberName)) return;
+        if (!NameofHints.TryGetValue(shortTypeName, out var set))
+        {
+            set = new HashSet<string>(StringComparer.Ordinal);
+            NameofHints[shortTypeName] = set;
         }
         set.Add(memberName);
     }
@@ -105,6 +118,28 @@ public static class SourceAnalyzer
                     if (symbol?.ContainingType != null && IsExternal(symbol.ContainingType, localTypes))
                         result.AddMember(GetFullName(symbol.ContainingType), symbol.Name);
                 }
+            }
+
+            // nameof(Type.Member) — semantic resolution is unreliable under high error counts;
+            // extract syntactically and let ReferenceResolver match by short name.
+            foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                if (invocation.Expression is not IdentifierNameSyntax { Identifier.Text: "nameof" }) continue;
+                var arg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+                if (arg is not MemberAccessExpressionSyntax ma) continue;
+
+                var memberName = ma.Name.Identifier.Text;
+                // Extract the rightmost simple name from the type expression (handles Namespace.Type)
+                var shortTypeName = ma.Expression is MemberAccessExpressionSyntax nested
+                    ? nested.Name.Identifier.Text
+                    : ma.Expression is SimpleNameSyntax sn ? sn.Identifier.Text : ma.Expression.ToString();
+                result.AddNameofHint(shortTypeName, memberName);
+
+                // Also try semantic path as a bonus
+                var si = model.GetSymbolInfo(ma);
+                var sym = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
+                if (sym?.ContainingType != null && IsExternal(sym.ContainingType, localTypes))
+                    result.AddMember(GetFullName(sym.ContainingType), memberName);
             }
 
             foreach (var typeSyntax in root.DescendantNodes().OfType<TypeSyntax>())

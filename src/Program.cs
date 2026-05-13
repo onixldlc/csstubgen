@@ -19,7 +19,6 @@ class Program
         var refPaths = new List<string>();
         var libPaths = new List<string>();
         string outDir = "./stubs";
-        string unityVersion = "2022.3.9";
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -38,7 +37,7 @@ class Program
                     if (++i < args.Length) outDir = args[i];
                     break;
                 case "--unity-version":
-                    if (++i < args.Length) unityVersion = args[i];
+                    if (++i < args.Length) { /* ignored */ }
                     break;
             }
         }
@@ -96,7 +95,7 @@ class Program
             Console.WriteLine($"  {asm}: {string.Join(", ", types.Select(t => t.Definition.Name).OrderBy(x => x))}");
         }
 
-        StubWriter.Write(result, outDir, unityVersion);
+        StubWriter.Write(result, outDir);
         Console.WriteLine($"[csstubgen] Stubs written to: {outDir}");
 
         return 0;
@@ -122,7 +121,6 @@ class Program
         Console.WriteLine("  -r, --ref <path>          Reference DLL or directory to generate stubs for (required, repeatable)");
         Console.WriteLine("  -l, --lib <path>          Library DLL or directory for analysis only, no stubs (repeatable)");
         Console.WriteLine("  -o, --out <path>          Output directory (default: ./stubs)");
-        Console.WriteLine("  --unity-version <ver>     UnityEngine.Modules NuGet version (default: 2022.3.9)");
         Console.WriteLine("  -h, --help                Show this help");
         Console.WriteLine();
         Console.WriteLine("Examples:");

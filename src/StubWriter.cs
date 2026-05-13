@@ -9,7 +9,7 @@ namespace CsStubGen;
 
 public static class StubWriter
 {
-    public static void Write(ResolverResult result, string outDir, string unityVersion)
+    public static void Write(ResolverResult result, string outDir)
     {
         Directory.CreateDirectory(outDir);
 
@@ -19,8 +19,28 @@ public static class StubWriter
             Directory.CreateDirectory(asmDir);
 
             WriteStubCs(types, Path.Combine(asmDir, "Stubs.cs"));
-            WriteCsproj(assemblyName, result, asmDir, unityVersion);
+            WriteCsproj(assemblyName, result, asmDir);
         }
+
+        WriteStubsProps(result, outDir);
+    }
+
+    static void WriteStubsProps(ResolverResult result, string outDir)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("<Project>");
+        sb.AppendLine("  <!-- Game-specific stubs (minimal signatures, no proprietary code) -->");
+        sb.AppendLine("  <ItemGroup>");
+        foreach (var assemblyName in result.TypesByAssembly.Keys.OrderBy(x => x))
+        {
+            sb.AppendLine($"    <ProjectReference Include=\"$(MSBuildThisFileDirectory){assemblyName}\\{assemblyName}.csproj\">");
+            sb.AppendLine("      <Private>false</Private>");
+            sb.AppendLine("    </ProjectReference>");
+        }
+        sb.AppendLine("  </ItemGroup>");
+        sb.AppendLine("</Project>");
+
+        File.WriteAllText(Path.Combine(outDir, "Stubs.props"), sb.ToString());
     }
 
     static void WriteStubCs(List<ResolvedType> types, string path)
@@ -32,9 +52,10 @@ public static class StubWriter
         sb.AppendLine();
 
         var usings = CollectUsings(types);
+        sb.AppendLine("using System;");
         foreach (var ns in usings.OrderBy(x => x))
             sb.AppendLine($"using {ns};");
-        if (usings.Count > 0) sb.AppendLine();
+        sb.AppendLine();
 
         var byNamespace = types.GroupBy(t => t.Definition.Namespace ?? "").OrderBy(g => g.Key);
 
@@ -72,6 +93,19 @@ public static class StubWriter
     {
         var type = rt.Definition;
 
+        // delegates cannot be expressed as classes — emit delegate keyword form
+        var baseFullName = type.BaseType?.FullName;
+        if (baseFullName == "System.MulticastDelegate" || baseFullName == "System.Delegate")
+        {
+            var invoke = type.Methods.FirstOrDefault(m => m.Name == "Invoke");
+            var ret = invoke != null ? FormatTypeRef(invoke.ReturnType) : "void";
+            var prms = invoke != null ? FormatParameters(invoke) : "";
+            var acc = (type.IsPublic || type.IsNestedPublic) ? "public" : "internal";
+            var gp = FormatGenericParams(type);
+            sb.AppendLine($"{indent}{acc} delegate {ret} {StripGenericArity(type.Name)}{gp}({prms});");
+            return;
+        }
+
         // modifiers
         var mods = new List<string>();
         if (type.IsPublic || type.IsNestedPublic) mods.Add("public");
@@ -102,10 +136,7 @@ public static class StubWriter
         // as long as the interface type exists in NuGet or stubs)
         foreach (var iface in type.Interfaces)
         {
-            var ifaceName = StripGenericArity(iface.InterfaceType.Name);
-            // only include if we have a stub for it (otherwise it's from NuGet/framework)
-            // skip for now — interfaces from the same assembly will be in stubs,
-            // others are assumed external
+            baseParts.Add(FormatTypeRef(iface.InterfaceType));
         }
 
         var baseClause = baseParts.Count > 0 ? " : " + string.Join(", ", baseParts) : "";
@@ -119,7 +150,7 @@ public static class StubWriter
         {
             // enum members use declaration syntax, not field syntax
             var enumFields = type.Fields
-                .Where(f => f.IsPublic && f.IsStatic && f.IsLiteral && rt.NeededMembers.Contains(f.Name))
+                .Where(f => f.IsPublic && f.IsStatic && f.IsLiteral)
                 .OrderBy(f => f.Name)
                 .ToList();
             for (int fi = 0; fi < enumFields.Count; fi++)
@@ -131,43 +162,73 @@ public static class StubWriter
         else
         {
             // fields
-            foreach (var field in type.Fields.Where(f => f.IsPublic).OrderBy(f => f.Name))
+            foreach (var field in type.Fields.Where(f => f.IsPublic || f.IsFamily).OrderBy(f => f.Name))
             {
-                if (!rt.NeededMembers.Contains(field.Name)) continue;
                 if (field.IsSpecialName) continue;
 
-                var fMods = field.IsStatic ? "public static" : "public";
+                var fMods = field.IsStatic ? "public static" : (field.IsFamily ? "protected" : "public");
                 sb.AppendLine($"{memberIndent}{fMods} {FormatTypeRef(field.FieldType)} {field.Name};");
             }
 
             // properties
             foreach (var prop in type.Properties.OrderBy(p => p.Name))
             {
-                if (!rt.NeededMembers.Contains(prop.Name)) continue;
                 var getter = prop.GetMethod;
                 var setter = prop.SetMethod;
                 if (getter == null && setter == null) continue;
-                if (getter != null && !getter.IsPublic && (setter == null || !setter.IsPublic)) continue;
+                if (getter != null && !getter.IsPublic && !getter.IsFamily && (setter == null || (!setter.IsPublic && !setter.IsFamily))) continue;
 
-                var pMods = new List<string> { "public" };
+                var pMods = new List<string>();
+                if (getter?.IsPublic == true || setter?.IsPublic == true) pMods.Add("public");
+                else pMods.Add("protected");
                 if ((getter?.IsStatic ?? false) || (setter?.IsStatic ?? false))
                     pMods.Add("static");
 
-                var accessors = new List<string>();
-                if (getter != null) accessors.Add("get;");
-                if (setter != null)
+                var propType = FormatTypeRef(prop.PropertyType);
+                if (getter != null && setter == null)
                 {
-                    if (setter.IsPublic) accessors.Add("set;");
-                    else accessors.Add("private set;");
+                    // expression-bodied avoids auto-property backing field (prevents struct self-ref cycle)
+                    var staticKw = (getter.IsStatic ? " static" : "");
+                    sb.AppendLine($"{memberIndent}public{staticKw} {propType} {prop.Name}");
+                    sb.AppendLine($"{memberIndent}    => throw new System.NotImplementedException(\"Stub\");");
                 }
-
-                sb.AppendLine($"{memberIndent}{string.Join(" ", pMods)} {FormatTypeRef(prop.PropertyType)} {prop.Name} {{ {string.Join(" ", accessors)} }}");
+                else
+                {
+                    var accessors = new List<string>();
+                    if (getter != null) accessors.Add("get;");
+                    if (setter != null)
+                    {
+                        if (setter.IsPublic) accessors.Add("set;");
+                        else accessors.Add("private set;");
+                    }
+                    sb.AppendLine($"{memberIndent}{string.Join(" ", pMods)} {propType} {prop.Name} {{ {string.Join(" ", accessors)} }}");
+                }
             }
 
-            // methods
+            // events
+            foreach (var evt in type.Events.OrderBy(e => e.Name))
+            {
+                var addMethod = evt.AddMethod;
+                if (addMethod == null || (!addMethod.IsPublic && !addMethod.IsFamily)) continue;
+                var eMods = addMethod.IsPublic ? "public" : "protected";
+                if (addMethod.IsStatic) eMods += " static";
+                sb.AppendLine($"{memberIndent}{eMods} event {FormatTypeRef(evt.EventType)} {evt.Name};");
+            }
+
+            // constructors
+            foreach (var ctor in type.Methods
+                .Where(m => m.IsConstructor && (m.IsPublic || m.IsFamily) && !m.IsStatic)
+                .OrderBy(m => m.Parameters.Count))
+            {
+                var cMods = ctor.IsPublic ? "public" : "protected";
+                var parameters = FormatParameters(ctor);
+                sb.AppendLine($"{memberIndent}{cMods} {StripGenericArity(type.Name)}({parameters}) {{ }}");
+            }
+
+            // methods (only used ones)
             foreach (var method in type.Methods.OrderBy(m => m.Name))
             {
-                if (!method.IsPublic) continue;
+                if (!method.IsPublic && !method.IsFamily) continue;
                 if (method.IsConstructor) continue;
                 if (method.Name.StartsWith("get_") || method.Name.StartsWith("set_")) continue;
                 if (method.Name.StartsWith("add_") || method.Name.StartsWith("remove_")) continue;
@@ -185,6 +246,7 @@ public static class StubWriter
     {
         var mods = new List<string>();
         if (method.IsPublic) mods.Add("public");
+        else if (method.IsFamily) mods.Add("protected");
 
         if (method.IsStatic)
             mods.Add("static");
@@ -336,30 +398,28 @@ public static class StubWriter
         var usings = new HashSet<string>(StringComparer.Ordinal);
         foreach (var rt in types)
         {
-            CheckNamespace(rt.Definition.BaseType, usings);
-            foreach (var field in rt.Definition.Fields.Where(f => f.IsPublic))
+            var ownerNs = rt.Definition.Namespace ?? "";
+            CheckNamespace(rt.Definition.BaseType, usings, ownerNs);
+            foreach (var field in rt.Definition.Fields.Where(f => f.IsPublic || f.IsFamily))
             {
-                if (!rt.NeededMembers.Contains(field.Name)) continue;
-                CheckNamespace(field.FieldType, usings);
+                CheckNamespace(field.FieldType, usings, ownerNs);
             }
-            foreach (var method in rt.Definition.Methods.Where(m => m.IsPublic))
+            foreach (var method in rt.Definition.Methods.Where(m => m.IsPublic || m.IsFamily))
             {
-                if (method.IsConstructor || !rt.NeededMembers.Contains(method.Name)) continue;
-                CheckNamespace(method.ReturnType, usings);
+                if (!method.IsConstructor && !rt.NeededMembers.Contains(method.Name)) continue;
+                CheckNamespace(method.ReturnType, usings, ownerNs);
                 foreach (var p in method.Parameters)
-                    CheckNamespace(p.ParameterType, usings);
+                    CheckNamespace(p.ParameterType, usings, ownerNs);
             }
             foreach (var prop in rt.Definition.Properties)
             {
-                if (!rt.NeededMembers.Contains(prop.Name)) continue;
-                CheckNamespace(prop.PropertyType, usings);
+                CheckNamespace(prop.PropertyType, usings, ownerNs);
+            }
+            foreach (var evt in rt.Definition.Events)
+            {
+                CheckNamespace(evt.EventType, usings, ownerNs);
             }
         }
-
-        // remove namespaces that are defined in our stubs
-        var stubNamespaces = types.Select(t => t.Definition.Namespace).Where(n => !string.IsNullOrEmpty(n)).ToHashSet();
-        foreach (var ns in stubNamespaces)
-            usings.Remove(ns);
 
         // remove System (always available)
         usings.Remove("System");
@@ -368,36 +428,36 @@ public static class StubWriter
         return usings;
     }
 
-    static void CheckNamespace(TypeReference type, HashSet<string> usings)
+    static void CheckNamespace(TypeReference type, HashSet<string> usings, string ownerNs = "")
     {
         if (type == null) return;
 
         if (type is GenericInstanceType gen)
         {
-            CheckNamespace(gen.ElementType, usings);
+            CheckNamespace(gen.ElementType, usings, ownerNs);
             foreach (var arg in gen.GenericArguments)
-                CheckNamespace(arg, usings);
+                CheckNamespace(arg, usings, ownerNs);
             return;
         }
 
         if (type is ArrayType arr)
         {
-            CheckNamespace(arr.ElementType, usings);
+            CheckNamespace(arr.ElementType, usings, ownerNs);
             return;
         }
 
         if (type is ByReferenceType byRef)
         {
-            CheckNamespace(byRef.ElementType, usings);
+            CheckNamespace(byRef.ElementType, usings, ownerNs);
             return;
         }
 
         var ns = type.Namespace;
-        if (!string.IsNullOrEmpty(ns) && ns != "System")
+        if (!string.IsNullOrEmpty(ns) && ns != "System" && ns != ownerNs)
             usings.Add(ns);
     }
 
-    static void WriteCsproj(string assemblyName, ResolverResult result, string dir, string unityVersion)
+    static void WriteCsproj(string assemblyName, ResolverResult result, string dir)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">");
@@ -410,17 +470,6 @@ public static class StubWriter
         sb.AppendLine("    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>");
         sb.AppendLine("    <NoWarn>CS0649;CS0169;CS0414;CS0626</NoWarn>");
         sb.AppendLine("  </PropertyGroup>");
-
-        // check if any type references UnityEngine
-        bool needsUnity = result.TypesByAssembly[assemblyName]
-            .Any(t => ReferencesUnity(t));
-
-        if (needsUnity)
-        {
-            sb.AppendLine("  <ItemGroup>");
-            sb.AppendLine($"    <PackageReference Include=\"UnityEngine.Modules\" Version=\"{unityVersion}\" />");
-            sb.AppendLine("  </ItemGroup>");
-        }
 
         // cross-assembly dependencies
         if (result.AssemblyDependencies.TryGetValue(assemblyName, out var deps) && deps.Count > 0)
@@ -437,16 +486,6 @@ public static class StubWriter
         sb.AppendLine("</Project>");
 
         File.WriteAllText(Path.Combine(dir, $"{assemblyName}.csproj"), sb.ToString());
-    }
-
-    static bool ReferencesUnity(ResolvedType rt)
-    {
-        var type = rt.Definition;
-        if (type.BaseType?.Namespace?.StartsWith("UnityEngine") == true) return true;
-        if (type.Fields.Any(f => f.IsPublic && rt.NeededMembers.Contains(f.Name) && f.FieldType.Namespace?.StartsWith("UnityEngine") == true)) return true;
-        if (type.Methods.Any(m => m.IsPublic && rt.NeededMembers.Contains(m.Name) && m.ReturnType.Namespace?.StartsWith("UnityEngine") == true)) return true;
-        if (type.Properties.Any(p => rt.NeededMembers.Contains(p.Name) && p.PropertyType.Namespace?.StartsWith("UnityEngine") == true)) return true;
-        return false;
     }
 
     static int GetInheritanceDepth(TypeDefinition type)

@@ -82,7 +82,7 @@ public static class ReferenceResolver
             if (entry == null) continue;
             var (typeDef, asmName) = entry.Value;
 
-            if (IsUnityAssembly(asmName) || IsFrameworkAssembly(asmName)) continue;
+            if (IsFrameworkAssembly(asmName)) continue;
 
             var rt = new ResolvedType
             {
@@ -118,7 +118,27 @@ public static class ReferenceResolver
                 EnqueueShellDeps(rt.Definition, rt, shellQueue2, knownAssemblies, result, rt.AssemblyName);
         ProcessShellQueue(shellQueue2, processed, typeIndex, knownAssemblies, result);
 
+        // Layer 5: nameof hints — match by short type name and add members that exist in the DLL
+        ApplyNameofHints(analysis.NameofHints, result);
+
         return result;
+    }
+
+    static void ApplyNameofHints(Dictionary<string, HashSet<string>> hints, ResolverResult result)
+    {
+        foreach (var typeList in result.TypesByAssembly.Values)
+        {
+            foreach (var rt in typeList)
+            {
+                var shortName = StripGenericArity(rt.Definition.Name);
+                if (!hints.TryGetValue(shortName, out var memberNames)) continue;
+                foreach (var m in memberNames)
+                {
+                    if (HasMemberRelaxed(rt.Definition, m))
+                        rt.NeededMembers.Add(m);
+                }
+            }
+        }
     }
 
     static void ProcessShellQueue(Queue<string> shellQueue, HashSet<string> processed,
@@ -135,7 +155,7 @@ public static class ReferenceResolver
             if (entry == null) continue;
             var (typeDef, asmName) = entry.Value;
 
-            if (IsUnityAssembly(asmName) || IsFrameworkAssembly(asmName)) continue;
+            if (IsFrameworkAssembly(asmName)) continue;
 
             var rt = new ResolvedType
             {
@@ -163,21 +183,29 @@ public static class ReferenceResolver
         if (typeDef.BaseType != null && !IsTrivialBase(typeDef.BaseType))
         {
             shellQueue.Enqueue(GetCecilKey(typeDef.BaseType));
-
             var baseScope = GetAssemblyScope(typeDef.BaseType);
             if (baseScope != null && knownAssemblies.Contains(baseScope) && baseScope != asmName)
                 result.AddDependency(asmName, baseScope);
         }
 
+        foreach (var iface in typeDef.Interfaces)
+        {
+            shellQueue.Enqueue(GetCecilKey(iface.InterfaceType));
+            var ifaceScope = GetAssemblyScope(iface.InterfaceType);
+            if (ifaceScope != null && knownAssemblies.Contains(ifaceScope) && ifaceScope != asmName)
+                result.AddDependency(asmName, ifaceScope);
+        }
+
         foreach (var field in typeDef.Fields)
         {
-            if (!field.IsPublic || !rt.NeededMembers.Contains(field.Name)) continue;
+            if (!field.IsPublic && !field.IsFamily) continue;
             EnqueueSignatureType(field.FieldType, shellQueue, knownAssemblies, result, asmName);
         }
 
         foreach (var method in typeDef.Methods)
         {
-            if (!method.IsPublic || method.IsConstructor || !rt.NeededMembers.Contains(method.Name)) continue;
+            if (!method.IsPublic && !method.IsFamily) continue;
+            if (!method.IsConstructor && !rt.NeededMembers.Contains(method.Name)) continue;
             EnqueueSignatureType(method.ReturnType, shellQueue, knownAssemblies, result, asmName);
             foreach (var p in method.Parameters)
                 EnqueueSignatureType(p.ParameterType, shellQueue, knownAssemblies, result, asmName);
@@ -185,8 +213,14 @@ public static class ReferenceResolver
 
         foreach (var prop in typeDef.Properties)
         {
-            if (!rt.NeededMembers.Contains(prop.Name)) continue;
             EnqueueSignatureType(prop.PropertyType, shellQueue, knownAssemblies, result, asmName);
+        }
+
+        foreach (var evt in typeDef.Events)
+        {
+            var addMethod = evt.AddMethod;
+            if (addMethod == null || (!addMethod.IsPublic && !addMethod.IsFamily)) continue;
+            EnqueueSignatureType(evt.EventType, shellQueue, knownAssemblies, result, asmName);
         }
     }
 
@@ -334,8 +368,16 @@ public static class ReferenceResolver
 
     static bool HasMember(TypeDefinition type, string name)
     {
+        return type.Fields.Any(f => (f.IsPublic || f.IsFamily) && f.Name == name)
+            || type.Methods.Any(m => (m.IsPublic || m.IsFamily) && !m.IsSpecialName && m.Name == name)
+            || type.Properties.Any(p => p.Name == name);
+    }
+
+    // Like HasMember but also includes protected methods (needed for nameof targets)
+    static bool HasMemberRelaxed(TypeDefinition type, string name)
+    {
         return type.Fields.Any(f => f.IsPublic && f.Name == name)
-            || type.Methods.Any(m => m.IsPublic && m.Name == name)
+            || type.Methods.Any(m => (m.IsPublic || m.IsFamily) && !m.IsSpecialName && m.Name == name)
             || type.Properties.Any(p => p.Name == name);
     }
 
@@ -351,11 +393,6 @@ public static class ReferenceResolver
     {
         var fn = baseType.FullName;
         return fn == "System.Object" || fn == "System.ValueType" || fn == "System.Enum";
-    }
-
-    static bool IsUnityAssembly(string assemblyName)
-    {
-        return assemblyName == "UnityEngine" || assemblyName.StartsWith("UnityEngine.");
     }
 
     static bool IsFrameworkAssembly(string assemblyName)
