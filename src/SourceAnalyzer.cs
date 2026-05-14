@@ -10,20 +10,17 @@ namespace CsStubGen;
 
 public class AnalysisResult
 {
-    // Preserved for future ReferenceResolver compatibility (not populated yet)
-    public Dictionary<string, HashSet<string>> TypeMembers { get; } = new(StringComparer.Ordinal);
-    public HashSet<string> Namespaces { get; } = new(StringComparer.Ordinal);
-    public HashSet<string> BaseTypeNames { get; } = new(StringComparer.Ordinal);
-    public Dictionary<string, HashSet<string>> NameofHints { get; } = new(StringComparer.Ordinal);
+    // Used members per type: "Rewired.Controller" → { "GetButtonDown", "GetButton" }
+    public Dictionary<string, HashSet<string>> UsedMembers { get; } = new(StringComparer.Ordinal);
 
-    // All unique method/function calls found in source — tag: "bcl" | "external" | "unresolved"
-    public SortedDictionary<string, string> CalledMethods { get; } = new(StringComparer.Ordinal);
-
-    // Approximate stub signature for resolved methods
-    public SortedDictionary<string, string> MethodSignatures { get; } = new(StringComparer.Ordinal);
+    // Which assembly each type belongs to: "Rewired.Controller" → "Rewired_Core"
+    public Dictionary<string, string> TypeAssembly { get; } = new(StringComparer.Ordinal);
 
     // All types referenced in external method signatures, grouped by assembly
     public SortedDictionary<string, SortedSet<string>> ReferencedTypes { get; } = new(StringComparer.Ordinal);
+
+    // Raw called methods for verbose logging
+    public SortedDictionary<string, string> CalledMethods { get; } = new(StringComparer.Ordinal);
 }
 
 public static class SourceAnalyzer
@@ -112,48 +109,54 @@ public static class SourceAnalyzer
                         : IsFrameworkAssembly(asmName) ? "bcl" : "external";
 
                     tag = $"{bucket} | {typeName} ({asmName})";
-                }
 
-                result.CalledMethods.Add(entry, tag);
-                if (symbol is IMethodSymbol ms)
-                {
-                    result.MethodSignatures[entry] = BuildStub(ms);
-                    if (tag.StartsWith("external"))
+                    if (bucket == "external" && symbol is IMethodSymbol ms)
                     {
+                        var methodName = ms.Name;
+
+                        if (!result.UsedMembers.TryGetValue(typeName, out var members))
+                            result.UsedMembers[typeName] = members = new HashSet<string>(StringComparer.Ordinal);
+                        members.Add(methodName);
+
+                        if (!result.TypeAssembly.ContainsKey(typeName))
+                            result.TypeAssembly[typeName] = asmName;
+
                         CollectTypes(ms.ReturnType, result.ReferencedTypes);
                         foreach (var p in ms.Parameters)
                             CollectTypes(p.Type, result.ReferencedTypes);
                     }
                 }
+
+                result.CalledMethods.Add(entry, tag);
+            }
+
+            // Also collect member access on fields/properties
+            foreach (var memberAccess in root.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+            {
+                var si = model.GetSymbolInfo(memberAccess);
+                var symbol = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
+                if (symbol == null) continue;
+
+                var kind = symbol.Kind;
+                if (kind != SymbolKind.Property && kind != SymbolKind.Field && kind != SymbolKind.Event) continue;
+
+                var containingType = symbol.ContainingType;
+                var asm = containingType?.ContainingAssembly;
+                if (asm == null || IsFrameworkAssembly(asm.Name) || asm.Name == "StubAnalysis") continue;
+
+                var typeName = containingType.ToDisplayString();
+                var memberName = symbol.Name;
+
+                if (!result.UsedMembers.TryGetValue(typeName, out var members))
+                    result.UsedMembers[typeName] = members = new HashSet<string>(StringComparer.Ordinal);
+                members.Add(memberName);
+
+                if (!result.TypeAssembly.ContainsKey(typeName))
+                    result.TypeAssembly[typeName] = asm.Name;
             }
         }
 
         return result;
-    }
-
-    static string BuildStub(IMethodSymbol m)
-    {
-        var acc = m.DeclaredAccessibility switch
-        {
-            Accessibility.Public    => "public",
-            Accessibility.Protected => "protected",
-            Accessibility.Internal  => "internal",
-            _                       => "public"
-        };
-        var stat = m.IsStatic ? " static" : "";
-        var ret  = m.ReturnType.ToDisplayString();
-        var parms = string.Join(", ", m.Parameters.Select(p =>
-        {
-            var prefix = p.RefKind switch
-            {
-                RefKind.Ref  => "ref ",
-                RefKind.Out  => "out ",
-                RefKind.In   => "in ",
-                _            => ""
-            };
-            return $"{prefix}{p.Type.ToDisplayString()} {p.Name}";
-        }));
-        return $"{acc}{stat} {ret} {m.Name}({parms}) {{ throw new System.NotImplementedException(); }}";
     }
 
     static void CollectTypes(ITypeSymbol type, SortedDictionary<string, SortedSet<string>> dest)
@@ -178,7 +181,7 @@ public static class SourceAnalyzer
         }
     }
 
-    static bool IsFrameworkAssembly(string name) =>
+    public static bool IsFrameworkAssembly(string name) =>
         name == "mscorlib" || name == "netstandard" || name == "System.Private.CoreLib"
         || name == "System" || name.StartsWith("System.") || name.StartsWith("Microsoft.CSharp");
 }
