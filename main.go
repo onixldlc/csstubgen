@@ -213,7 +213,7 @@ func cmdDll(args []string) {
 func cmdGenerate(args []string) {
 	var name, outDir, unityVer, image string
 	var sources []string
-	var verbose bool
+	var verbose, debug bool
 	outDir = "./stubs"
 	unityVer = "2022.3.9"
 
@@ -235,6 +235,9 @@ func cmdGenerate(args []string) {
 			i++
 			image = args[i]
 		case "-v", "--verbose":
+			verbose = true
+		case "--debug":
+			debug = true
 			verbose = true
 		case "-h", "--help":
 			fmt.Println("Usage: csstubgen generate --name <name> [-s <source>...] [-o <output>] [-v] [--image <image>]")
@@ -267,25 +270,33 @@ func cmdGenerate(args []string) {
 	img := resolveImage(image)
 	ensureImage(rt, img)
 
-	containerArgs := []string{
-		"run", "--rm",
-		"-v", cwd + ":/work:z",
-		"-v", storeDir + ":/ref:ro,z",
+	runFlags := []string{"run", "--rm"}
+	if debug {
+		runFlags = append(runFlags, "-it")
+	}
+	containerArgs := append(runFlags,
+		"-v", cwd+":/work:z",
+		"-v", storeDir+":/ref:ro,z",
 		"-w", "/work",
 		img, "generate",
-	}
+	)
 
 	for _, s := range sources {
 		containerArgs = append(containerArgs, "-s", s)
 	}
 	containerArgs = append(containerArgs, "-r", "/ref", "-o", outDir, "--unity-version", unityVer)
-	if verbose {
+	if debug {
+		containerArgs = append(containerArgs, "--debug")
+	} else if verbose {
 		containerArgs = append(containerArgs, "-v")
 	}
 
 	cmd := exec.Command(rt, containerArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if debug {
+		cmd.Stdin = os.Stdin
+	}
 
 	if err := cmd.Run(); err != nil {
 		fatal("generate failed: %v", err)

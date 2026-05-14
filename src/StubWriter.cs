@@ -13,7 +13,7 @@ namespace CsStubGen;
 
 public static class StubWriter
 {
-    public static void Write(AnalysisResult analysis, IEnumerable<string> refDlls, string outDir, bool verbose = false)
+    public static void Write(AnalysisResult analysis, IEnumerable<string> refDlls, string outDir, bool verbose = false, bool debug = false)
     {
         Directory.CreateDirectory(outDir);
 
@@ -78,7 +78,7 @@ public static class StubWriter
             var asmDir = Path.Combine(outDir, asmName);
             Directory.CreateDirectory(asmDir);
 
-            var stubSource = DecompileAndPrune(dllPath, typeNames, analysis.UsedMembers, knownTypes, verbose);
+            var stubSource = DecompileAndPrune(dllPath, typeNames, analysis.UsedMembers, knownTypes, verbose, debug);
             if (string.IsNullOrWhiteSpace(stubSource)) continue;
 
             var header = "// =============================================================================\n"
@@ -89,6 +89,13 @@ public static class StubWriter
             WriteCsproj(asmName, asmDir);
             generatedAssemblies.Add(asmName);
             Console.WriteLine($"[csstubgen] Generated stubs for {asmName} ({typeNames.Count} types)");
+
+            if (debug)
+            {
+                Console.Write("[debug] Press Enter to continue to next assembly (q to quit)... ");
+                var input = Console.ReadLine();
+                if (input?.Trim().ToLowerInvariant() == "q") return;
+            }
         }
 
         if (generatedAssemblies.Count > 0)
@@ -96,7 +103,7 @@ public static class StubWriter
     }
 
         static string DecompileAndPrune(string dllPath, HashSet<string> typeNames,
-        Dictionary<string, HashSet<string>> usedMembers, HashSet<string> knownTypes, bool verbose)
+        Dictionary<string, HashSet<string>> usedMembers, HashSet<string> knownTypes, bool verbose, bool debug = false)
     {
         var settings = new DecompilerSettings
         {
@@ -117,48 +124,80 @@ public static class StubWriter
             availableTypes.Add(td.ReflectionName);
 
 
+        var asmName = Path.GetFileNameWithoutExtension(dllPath);
+        var debugDir = debug ? Path.Combine("debug", asmName) : null;
+        if (debugDir != null) Directory.CreateDirectory(debugDir);
+
         foreach (var typeName in typeNames.OrderBy(x => x))
         {
-            // Strip generic type args: "List<int>" → "List", "Dict<K,V>" → "Dict"
             var cleanName = typeName;
             var angleBracket = cleanName.IndexOf('<');
             if (angleBracket >= 0)
                 cleanName = cleanName.Substring(0, angleBracket);
 
-            // Avoid decompiling same type twice
             if (!decompiled.Add(cleanName)) continue;
 
-            // Try to find matching type in assembly
-            var reflectionName = cleanName; // Roslyn display name ≈ reflection name for non-generic
+            var reflectionName = cleanName;
             if (!availableTypes.Contains(reflectionName))
             {
                 Console.Error.WriteLine($"[warn] Type '{cleanName}' not found in {Path.GetFileName(dllPath)}, skipping");
                 continue;
             }
 
+            string source;
             try
             {
                 var fullTypeName = new FullTypeName(reflectionName);
-                var source = decompiler.DecompileTypeAsString(fullTypeName);
-                sb.AppendLine(source);
+                source = decompiler.DecompileTypeAsString(fullTypeName);
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[warn] Could not decompile type '{cleanName}': {ex.Message}");
+                continue;
             }
+
+            if (string.IsNullOrWhiteSpace(source)) continue;
+
+            var safeName = cleanName.Replace(".", "_");
+
+            if (debug)
+            {
+                File.WriteAllText(Path.Combine(debugDir, $"{safeName}.raw.cs"), source);
+                Console.WriteLine($"  [debug] wrote {safeName}.raw.cs");
+            }
+
+            // Parse and prune each type individually
+            var tree = CSharpSyntaxTree.ParseText(source);
+            var root = tree.GetRoot();
+
+            if (verbose)
+            {
+                var diags = tree.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+                if (diags.Count > 0)
+                    Console.WriteLine($"  [debug] parse errors for {cleanName}: {diags.Count} (first: {diags[0]})");
+            }
+
+            var pruner = new StubPruner(usedMembers, knownTypes, verbose, debug);
+            var pruned = pruner.Visit(root);
+            var prunedText = pruned.NormalizeWhitespace().ToFullString();
+
+            if (debug)
+            {
+                File.WriteAllText(Path.Combine(debugDir, $"{safeName}.pruned.cs"), prunedText);
+                Console.WriteLine($"  [debug] wrote {safeName}.pruned.cs");
+                Console.Write($"  [debug] Press Enter to continue (q to quit)... ");
+                var input = Console.ReadLine();
+                if (input?.Trim().ToLowerInvariant() == "q")
+                    Environment.Exit(0);
+            }
+
+            sb.AppendLine(prunedText);
         }
 
         var combined = sb.ToString();
         if (string.IsNullOrWhiteSpace(combined)) return combined;
 
-        // Parse with Roslyn and prune unused members
-        var tree = CSharpSyntaxTree.ParseText(combined);
-        var root = tree.GetRoot();
-
-        var pruner = new StubPruner(usedMembers, knownTypes, verbose);
-        var pruned = pruner.Visit(root);
-
-        return pruned.NormalizeWhitespace().ToFullString();
+        return combined;
     }
 
     static void WriteCsproj(string assemblyName, string dir)

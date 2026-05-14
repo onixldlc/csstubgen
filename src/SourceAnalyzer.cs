@@ -20,7 +20,16 @@ public class AnalysisResult
     public SortedDictionary<string, SortedSet<string>> ReferencedTypes { get; } = new(StringComparer.Ordinal);
 
     // Raw called methods for verbose logging
-    public SortedDictionary<string, string> CalledMethods { get; } = new(StringComparer.Ordinal);
+    public List<CalledMethodEntry> CalledMethods { get; } = new();
+}
+
+public class CalledMethodEntry
+{
+    public string Method { get; set; }
+    public string Group { get; set; }
+    public string Type { get; set; }
+    public string Source { get; set; }
+    public string Details { get; set; }
 }
 
 public static class SourceAnalyzer
@@ -84,15 +93,18 @@ public static class SourceAnalyzer
                         break;
                 }
 
-                if (entry == null || result.CalledMethods.ContainsKey(entry)) continue;
+                if (entry == null || result.CalledMethods.Any(m => m.Method == entry)) continue;
 
                 var si = model.GetSymbolInfo(invocation);
                 var symbol = si.Symbol ?? si.CandidateSymbols.FirstOrDefault();
 
-                string tag;
+                string group;
+                string typeName = "?";
+                string asmName = "";
+
                 if (symbol == null)
                 {
-                    tag = "unresolved";
+                    group = "unresolved";
                 }
                 else
                 {
@@ -101,16 +113,14 @@ public static class SourceAnalyzer
                         receiverType = model.GetTypeInfo(ma2.Expression).Type;
 
                     var resolvedAsm = receiverType?.ContainingAssembly ?? symbol.ContainingAssembly;
-                    var asmName = resolvedAsm?.Name ?? "";
-                    var typeName = receiverType?.ToDisplayString() ?? symbol.ContainingType?.ToDisplayString() ?? "?";
+                    asmName = resolvedAsm?.Name ?? "";
+                    typeName = receiverType?.ToDisplayString() ?? symbol.ContainingType?.ToDisplayString() ?? "?";
 
-                    var bucket = string.IsNullOrEmpty(asmName) ? "unresolved"
+                    group = string.IsNullOrEmpty(asmName) ? "unresolved"
                         : asmName == "StubAnalysis" ? "self"
                         : IsFrameworkAssembly(asmName) ? "bcl" : "external";
 
-                    tag = $"{bucket} | {typeName} ({asmName})";
-
-                    if (bucket == "external" && symbol is IMethodSymbol ms)
+                    if (group == "external" && symbol is IMethodSymbol ms)
                     {
                         var methodName = ms.Name;
 
@@ -127,7 +137,14 @@ public static class SourceAnalyzer
                     }
                 }
 
-                result.CalledMethods.Add(entry, tag);
+                result.CalledMethods.Add(new CalledMethodEntry
+                {
+                    Method = entry,
+                    Group = group,
+                    Type = typeName,
+                    Source = asmName,
+                    Details = $"{typeName} ({asmName})"
+                });
             }
 
             // Also collect member access on fields/properties
