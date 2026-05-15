@@ -5,7 +5,7 @@ using System.Linq;
 
 namespace CsStubGen;
 
-class FilterMethods
+class MethodsParser
 {
     public static MethodsDictionary Execute(List<string> sourceFiles, List<string> refDlls, List<string> libDlls, string outDir, bool debug)
     {
@@ -52,6 +52,7 @@ class FilterMethods
 class MethodsDictionary
 {
     public Dictionary<string, Bucket> bucket { get; set; } = new();
+    public Bucket this[string key] => bucket[key];
     public Bucket Get(string bucketName){
         if(bucket.ContainsKey(bucketName)){
             return bucket[bucketName];
@@ -66,6 +67,11 @@ class MethodsDictionary
             }
         }
         return filtered;
+    }
+    public MethodsDictionary Map(Func<string, Bucket, Bucket> transform){
+        var result = new MethodsDictionary();
+        foreach(var kv in bucket) result.bucket[kv.Key] = transform(kv.Key, kv.Value);
+        return result;
     }
     public string Json() => MethodsDictionaryJson.Serialize(this);
 }
@@ -87,6 +93,11 @@ class Bucket
         }
         return filtered;
     }
+    public Bucket Map(Func<string, Module, Module> transform){
+        var result = new Bucket();
+        foreach(var kv in module) result.module[kv.Key] = transform(kv.Key, kv.Value);
+        return result;
+    }
     public string Json() => MethodsDictionaryJson.Serialize(this);
 }
 class Module
@@ -106,6 +117,11 @@ class Module
             }
         }
         return filtered;
+    }
+    public Module Map(Func<string, MethodType, MethodType> transform){
+        var result = new Module();
+        foreach(var kv in type) result.type[kv.Key] = transform(kv.Key, kv.Value);
+        return result;
     }
     public string Json() => MethodsDictionaryJson.Serialize(this);
 }

@@ -30,112 +30,19 @@ class Logic
             return 1;
         }
 
-        
-        var methods_dictionary = FilterMethods.Execute(sourceFiles, refDlls, libDlls, outDir, debug);
+        // 1. structure the analysis result 
+        var methods_dictionary = MethodsParser.Execute(sourceFiles, refDlls, libDlls, outDir, debug);
 
-        // Console.WriteLine($"\n[csstubgen] Done. Output: {non_unity_core}");
+        // 2. filter the resulting analysis
+        var external_methods = methods_dictionary.Filter((key, bucket) => key == "external");
+        var external_methods_json = external_methods.Json();
+        File.WriteAllText(Path.Combine(outDir, "0008-external_methods.json"), external_methods_json);
 
-        // convert any source with . to the actual folder structure. 
-        /*
-        var exploaded = external_methods
-        for(const [bucket] of exploaded){
-            for(const [source] of exploaded.bucket){
-                if(source.includes('.'){
+        var no_unity_core = external_methods
+            .Map((_, bucket) => bucket.Filter((key, _) => key != "UnityEngine.CoreModule"));
+        var no_unity_core_json = no_unity_core.Json();
+        File.WriteAllText(Path.Combine(outDir, "0009-no_unity_core.json"), no_unity_core_json);
 
-                } 
-            }
-        }
-
-        */
-
-        // var exploaded_json = System.Text.Json.JsonSerializer.Serialize(exploaded, serialize_options);
-        // File.WriteAllText(Path.Combine(outDir, "0006-analysis_exploaded.json"), exploaded_json);
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Console.WriteLine($"[csstubgen] Source files: {sourceFiles.Count}");
-        // foreach (var f in sourceFiles)
-        //     Console.WriteLine($"  {f}");
-
-        // var analysis = SourceAnalyzer.Analyze(sourceFiles, refDlls.Concat(libDlls));
-
-        // Console.WriteLine($"\n[csstubgen] Found {analysis.CalledMethods.Count} unique method calls");
-
-        // if (verbose)
-        // {
-        //     foreach (var bucket in new[] { "bcl", "external", "self", "unresolved" })
-        //     {
-        //         var methods = analysis.CalledMethods.Where(kv => kv.Value.StartsWith(bucket)).ToList();
-        //         if (methods.Count == 0) continue;
-        //         Console.WriteLine($"\n-- [{bucket}] ({methods.Count}) --");
-        //         foreach (var (method, tag) in methods.OrderBy(kv => kv.Key))
-        //             Console.WriteLine($"    {method,-55} {tag}");
-        //     }
-        // }
-
-        // Console.WriteLine($"\n[csstubgen] Used types: {analysis.UsedMembers.Count}");
-        // if (verbose)
-        // {
-        //     foreach (var (typeName, members) in analysis.UsedMembers.OrderBy(kv => kv.Key))
-        //     {
-        //         var asm = analysis.TypeAssembly.GetValueOrDefault(typeName, "?");
-        //         Console.WriteLine($"  {typeName} ({asm})");
-        //         foreach (var m in members.OrderBy(x => x))
-        //             Console.WriteLine($"    .{m}");
-        //     }
-        // }
-
-        // Console.WriteLine($"\n[csstubgen] Referenced types in signatures:");
-        // foreach (var (asm, types) in analysis.ReferencedTypes)
-        // {
-        //     if (SourceAnalyzer.IsFrameworkAssembly(asm)) continue;
-        //     Console.WriteLine($"  [{asm}] {types.Count} types");
-        //     if (verbose)
-        //         foreach (var t in types)
-        //             Console.WriteLine($"    {t}");
-        // }
-
-        // Console.WriteLine($"\n[csstubgen] Generating stubs...");
-        // StubWriter.Write(analysis, refDlls, outDir, verbose, debug);
-
-        // Console.WriteLine($"\n[csstubgen] Done. Output: {outDir}");
         return 0;
     }
 
