@@ -19,6 +19,7 @@ class Program
         var libPaths = new List<string>();
         string outDir = "./stubs";
         bool verbose = false;
+        bool debug = false;
 
         for (int i = 0; i < args.Length; i++)
         {

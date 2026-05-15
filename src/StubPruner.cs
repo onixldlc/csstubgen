@@ -12,12 +12,14 @@ public class StubPruner : CSharpSyntaxRewriter
     readonly Dictionary<string, HashSet<string>> _usedMembers;
     readonly HashSet<string> _knownTypes;
     readonly bool _verbose;
+    readonly bool _debug;
 
-    public StubPruner(Dictionary<string, HashSet<string>> usedMembers, HashSet<string> knownTypes, bool verbose = false)
+    public StubPruner(Dictionary<string, HashSet<string>> usedMembers, HashSet<string> knownTypes, bool verbose = false, bool debug = false)
     {
         _usedMembers = usedMembers;
         _knownTypes = knownTypes;
         _verbose = verbose;
+        _debug = debug;
     }
 
     public override SyntaxNode VisitEnumDeclaration(EnumDeclarationSyntax node)

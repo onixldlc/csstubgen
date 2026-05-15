@@ -31,33 +31,39 @@ class Logic
         }
 
         
-        // dump the analysis result to ./analysis.json for debugging
-        var analysis_result = SourceAnalyzer.Analyze(sourceFiles, refDlls.Concat(libDlls));
-        var serialize_options = new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true,
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        };
-        var json = System.Text.Json.JsonSerializer.Serialize(analysis_result.CalledMethods, serialize_options);
-        Directory.CreateDirectory(outDir);
-        File.WriteAllText(Path.Combine(outDir, "0001-analysis.json"), json);
+        var methods_dictionary = FilterMethods.Execute(sourceFiles, refDlls, libDlls, outDir, debug);
 
-        // for each called method, group by bucket (bcl, external, self, unresolved) as json for debugging
-        var bucket_grouped = analysis_result.CalledMethods
-            .GroupBy(e => e.Group)
-            .ToDictionary(g => g.Key, g => g.Select(e => new { e.Method, e.Type, e.Source, e.Details }).ToList());
-        var bucket_grouped_json = System.Text.Json.JsonSerializer.Serialize(bucket_grouped, serialize_options);
-        File.WriteAllText(Path.Combine(outDir, "0002-analysis_grouped.json"), bucket_grouped_json);
+        // Console.WriteLine($"\n[csstubgen] Done. Output: {non_unity_core}");
 
-        var bucket_source_grouped = analysis_result.CalledMethods
-            .GroupBy(e => e.Group)
-            .ToDictionary(g => g.Key, g => g.GroupBy(e => e.Source).ToDictionary(sg => sg.Key, sg => sg.Select(e => new { e.Method, e.Type, e.Details }).ToList()));
-        var bucket_source_grouped_json = System.Text.Json.JsonSerializer.Serialize(bucket_source_grouped, serialize_options);
-        File.WriteAllText(Path.Combine(outDir, "0003-analysis_grouped_by_source.json"), bucket_source_grouped_json);
+        // convert any source with . to the actual folder structure. 
+        /*
+        var exploaded = external_methods
+        for(const [bucket] of exploaded){
+            for(const [source] of exploaded.bucket){
+                if(source.includes('.'){
 
-        // if method has variable (known by . in the name) then remove the variable name and keep just the method name
-        var method_grouped = bucket_source_grouped_json.SelectMany(kv => kv);
-        Console.WriteLine($"\n[csstubgen] Found {method_grouped} unique method calls");
+                } 
+            }
+        }
+
+        */
+
+        // var exploaded_json = System.Text.Json.JsonSerializer.Serialize(exploaded, serialize_options);
+        // File.WriteAllText(Path.Combine(outDir, "0006-analysis_exploaded.json"), exploaded_json);
+
+
+
+
+
+
+
+
+        
+
+
+
+
+
 
 
 
