@@ -33,9 +33,14 @@ class MethodsParser
                 currentModule.type[type] = new MethodType();
             }
 
+            var funcName = method.Split('.').Last();
+
+            // skip if method already exists to avoid duplicates
+            if(currentModule.type[type].method.Any(m => m.method == funcName))continue;
             var method_entry = new Method{
-                method = method,
-                details = details
+                method = funcName,
+                details = details,
+                stub = ""
             };
             currentModule.type[type].method.Add(method_entry);
         }
@@ -142,6 +147,7 @@ class Method
 {
     public string method { get; set; }
     public string details { get; set; }
+    public string stub { get; set; }
 }
 
 static class MethodsDictionaryJson
@@ -187,10 +193,8 @@ class ModuleConverter : DictWrapperConverter<Module, MethodType>
     protected override Dictionary<string, MethodType> GetDict(Module w) => w.type;
     protected override Module FromDict(Dictionary<string, MethodType> d) => new() { type = d };
 }
-class MethodTypeConverter : DictWrapperConverter<MethodType, List<Method>>
+class MethodTypeConverter : System.Text.Json.Serialization.JsonConverter<MethodType>
 {
-    protected override Dictionary<string, List<Method>> GetDict(MethodType w) => throw new NotImplementedException();
-    protected override MethodType FromDict(Dictionary<string, List<Method>> d) => throw new NotImplementedException();
     public override void Write(System.Text.Json.Utf8JsonWriter writer, MethodType value, System.Text.Json.JsonSerializerOptions o)
         => System.Text.Json.JsonSerializer.Serialize(writer, value.method, o);
     public override MethodType Read(ref System.Text.Json.Utf8JsonReader reader, System.Type t, System.Text.Json.JsonSerializerOptions o)

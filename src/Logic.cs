@@ -3,6 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
+using ICSharpCode.Decompiler;
+using ICSharpCode.Decompiler.CSharp;
+using System.Reflection.Metadata;
+
 namespace CsStubGen;
 
 class Logic
@@ -35,13 +39,21 @@ class Logic
 
         // 2. filter the resulting analysis
         var external_methods = methods_dictionary.Filter((key, bucket) => key == "external");
-        var external_methods_json = external_methods.Json();
-        File.WriteAllText(Path.Combine(outDir, "0008-external_methods.json"), external_methods_json);
+        if(debug){
+            var external_methods_json = external_methods.Json();
+            File.WriteAllText(Path.Combine(outDir, "0008-external_methods.json"), external_methods_json);
+        }
 
         var no_unity_core = external_methods
             .Map((_, bucket) => bucket.Filter((key, _) => key != "UnityEngine.CoreModule"));
-        var no_unity_core_json = no_unity_core.Json();
-        File.WriteAllText(Path.Combine(outDir, "0009-no_unity_core.json"), no_unity_core_json);
+        if(debug){
+            var no_unity_core_json = no_unity_core.Json();
+            File.WriteAllText(Path.Combine(outDir, "0009-no_unity_core.json"), no_unity_core_json);
+        }
+
+        // 3. go trough all the entries and decompiles per dll required
+        var type_list = StubStructurizer.Execute(no_unity_core, refDlls, libDlls, outDir, debug);
+
 
         return 0;
     }
