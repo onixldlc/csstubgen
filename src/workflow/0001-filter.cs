@@ -52,9 +52,10 @@ class FilterMethods
                 new MethodTypeConverter()
             }
         };
-        var methods_dictionary_json = System.Text.Json.JsonSerializer.Serialize(methods_dictionary, serialize_options);
-        File.WriteAllText(Path.Combine(outDir, "0007-analysis_formarted.json"), methods_dictionary_json);
-
+        if(debug){
+            var methods_dictionary_json = System.Text.Json.JsonSerializer.Serialize(methods_dictionary, serialize_options);
+            File.WriteAllText(Path.Combine(outDir, "analysis_formarted.json"), methods_dictionary_json);
+        }
         return methods_dictionary;
     }
 }
