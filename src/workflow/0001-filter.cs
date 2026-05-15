@@ -79,6 +79,9 @@ class MethodsDictionary
         }
         return filtered;
     }
+    public MethodsDictionary Json(string json, System.Text.Json.JsonSerializerOptions options){
+        return System.Text.Json.JsonSerializer.Deserialize<MethodsDictionary>(json, options);
+    }
 }
 class Bucket
 {
@@ -97,6 +100,9 @@ class Bucket
             }
         }
         return filtered;
+    }
+    public Bucket Json(string json, System.Text.Json.JsonSerializerOptions options){
+        return System.Text.Json.JsonSerializer.Deserialize<Bucket>(json, options);
     }
 }
 class Module
@@ -117,6 +123,10 @@ class Module
         }
         return filtered;
     }
+    public Module Json(string json, System.Text.Json.JsonSerializerOptions options){
+        return System.Text.Json.JsonSerializer.Deserialize<Module>(json, options);
+    }
+
 }
 class MethodType
 {
@@ -128,6 +138,9 @@ class MethodType
         var filtered = new MethodType();
         filtered.method = method.Where(predicate).ToList();
         return filtered;
+    }
+    public MethodType Json(string json, System.Text.Json.JsonSerializerOptions options){
+        return System.Text.Json.JsonSerializer.Deserialize<MethodType>(json, options);
     }
 }
 class Method
