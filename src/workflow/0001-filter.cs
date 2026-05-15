@@ -41,20 +41,8 @@ class FilterMethods
         }
 
         // dumps methods_dictionary to json for debugging
-        var serialize_options = new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true,
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-            Converters = {
-                new MethodsDictionaryConverter(),
-                new BucketConverter(),
-                new ModuleConverter(),
-                new MethodTypeConverter()
-            }
-        };
         if(debug){
-            var methods_dictionary_json = System.Text.Json.JsonSerializer.Serialize(methods_dictionary, serialize_options);
-            File.WriteAllText(Path.Combine(outDir, "analysis_formarted.json"), methods_dictionary_json);
+            File.WriteAllText(Path.Combine(outDir, "analysis_formarted.json"), methods_dictionary.Json());
         }
         return methods_dictionary;
     }
@@ -79,9 +67,7 @@ class MethodsDictionary
         }
         return filtered;
     }
-    public MethodsDictionary Json(string json, System.Text.Json.JsonSerializerOptions options){
-        return System.Text.Json.JsonSerializer.Deserialize<MethodsDictionary>(json, options);
-    }
+    public string Json() => MethodsDictionaryJson.Serialize(this);
 }
 class Bucket
 {
@@ -101,9 +87,7 @@ class Bucket
         }
         return filtered;
     }
-    public Bucket Json(string json, System.Text.Json.JsonSerializerOptions options){
-        return System.Text.Json.JsonSerializer.Deserialize<Bucket>(json, options);
-    }
+    public string Json() => MethodsDictionaryJson.Serialize(this);
 }
 class Module
 {
@@ -123,10 +107,7 @@ class Module
         }
         return filtered;
     }
-    public Module Json(string json, System.Text.Json.JsonSerializerOptions options){
-        return System.Text.Json.JsonSerializer.Deserialize<Module>(json, options);
-    }
-
+    public string Json() => MethodsDictionaryJson.Serialize(this);
 }
 class MethodType
 {
@@ -139,14 +120,28 @@ class MethodType
         filtered.method = method.Where(predicate).ToList();
         return filtered;
     }
-    public MethodType Json(string json, System.Text.Json.JsonSerializerOptions options){
-        return System.Text.Json.JsonSerializer.Deserialize<MethodType>(json, options);
-    }
+    public string Json() => MethodsDictionaryJson.Serialize(this);
 }
 class Method
 {
     public string method { get; set; }
     public string details { get; set; }
+}
+
+static class MethodsDictionaryJson
+{
+    public static readonly System.Text.Json.JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters = {
+            new MethodsDictionaryConverter(),
+            new BucketConverter(),
+            new ModuleConverter(),
+            new MethodTypeConverter()
+        }
+    };
+    public static string Serialize(object value) => System.Text.Json.JsonSerializer.Serialize(value, Options);
 }
 
 // --- transparent serialization: each wrapper class serializes as its inner dict ---
