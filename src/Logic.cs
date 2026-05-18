@@ -53,8 +53,30 @@ class Logic
 
         // 3. go trough all the entries and decompiles per dll required
         var type_list = StubStructurizer.Execute(no_unity_core, refDlls, libDlls, outDir, debug);
+        if(debug){
+            var stubbedModulesJson = StubStructurizer.JsonStubbedModules();
+            File.WriteAllText(Path.Combine(outDir, "0012-stubbed_modules.json"), stubbedModulesJson);
+        }
+
+        // 4. generate stubs based on the decompilation
+        var decompiled = StubStructurizer.StubbedModules;
+        if(debug){
+            foreach(var (moduleName, stub) in decompiled){
+                var stubDir = Path.Combine(outDir, "0012-stubs");
+                Directory.CreateDirectory(stubDir);
+                var outPath = Path.Combine(stubDir, $"{moduleName}.cs");
+                File.WriteAllText(outPath, stub);
+            }
+        }
+
+        // 5. build per-module stubs from the matched type handles collected in step 3
+        var idModules = StubStructurizer.IdModules;
+        StubBuilder.Execute(idModules, refDlls, libDlls, outDir, debug);
 
 
+
+
+        
         return 0;
     }
 

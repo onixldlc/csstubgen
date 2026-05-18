@@ -9,15 +9,22 @@ using ICSharpCode.Decompiler.CSharp;
 namespace CsStubGen;
 
 class StubStructurizer
-{
+{   
+    public static Dictionary<string, EntityHandle[]> IdModules { get; set; } = new Dictionary<string, EntityHandle[]>();
+    public static Dictionary<string, string> StubbedModules { get; set; } = new Dictionary<string, string>();
+    public static Dictionary<string, string> GetStubbedModules(){return StubbedModules;}
+    public static Dictionary<string, EntityHandle[]> GetIdModules(){return IdModules; }
+    public static string JsonStubbedModules() 
+    {
+        return System.Text.Json.JsonSerializer.Serialize(StubbedModules, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
+    }
     public static MethodsDictionary Execute(MethodsDictionary srcMethodDict, IEnumerable<string> refDlls, IEnumerable<string> libDlls, string outDir, bool debug)
     {
-        var settings = new DecompilerSettings {
-            ThrowOnAssemblyResolveErrors = false,
-            AlwaysUseBraces = true,
-            ShowXmlDocumentation = false,
-            DecompileMemberBodies = false,
-        };
+        var settings = DecompilerOptions.Build();
 
         var dllByAsm = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var dll in refDlls.Concat(libDlls))
@@ -29,14 +36,16 @@ class StubStructurizer
         }
 
         var decByAsm = new Dictionary<string, CSharpDecompiler>(StringComparer.Ordinal);
-        var stubDir = Path.Combine(outDir, "0010-stubs");
+        var stubDir = Path.Combine(outDir, "0011-stubs");
         Directory.CreateDirectory(stubDir);
 
         var stubDict = srcMethodDict
         .Map((_, bucket) => bucket
-            .Map((moduleName, moduleEntry) => moduleEntry
+            .Map((moduleName, moduleEntry) => {
+                var matchedMethodIds = new List<EntityHandle>();
+                var matchedTypeIds = new List<EntityHandle>();
+                var result = moduleEntry
                 .Map((typeName, typeEntry) => {
-
                     // load decompiler if exist, create one if doesn't exist
                     var hasCachedDecompiler = decByAsm.TryGetValue(moduleName, out var dec);
                     if (!hasCachedDecompiler)
@@ -68,6 +77,7 @@ class StubStructurizer
                         Console.Error.WriteLine($"[warn] type {baseTypeName} not found in {moduleName}");
                         return typeEntry;
                     }
+                    matchedTypeIds.Add(typeDef.MetadataToken);
 
                     // build a list of all the method in hash for quick lookup
                     var matchExactMode = StringComparer.Ordinal;
@@ -77,7 +87,6 @@ class StubStructurizer
 
                     // loop over every method in the DLL, match it against the source code list 
                     var allDllMethods = typeDef.Methods;
-                    var matchedMethodIds = new List<EntityHandle>();
                     var srcMethodNameDict = new Dictionary<string, EntityHandle>();
                     
                     
@@ -96,7 +105,7 @@ class StubStructurizer
                     }
 
                     // if no method matched, skip
-                    if (matchedMethodIds.Count == 0)return typeEntry;
+                    if (srcMethodNameDict.Count == 0)return typeEntry;
 
                     foreach(var method in srcMethodList){
                         var methodName = method.method;
@@ -111,27 +120,34 @@ class StubStructurizer
                         }
                     }
 
-                    // -- DECOMPILE ONLY THE MATCHED METHODS --
-                    // decompile the matched method to src
-                    try {
-                        var src = dec.DecompileAsString(matchedMethodIds);
-                        
-                        // sanitize the file name and save to: outDir/0010-stubs/AssemblyName__TypeName.cs
-                        var sanitizedFileName = baseTypeName
-                            .Replace(".", "_")
-                            .Replace("/", "_")
-                            .Replace("+", "_");
-                        var outputPath = Path.Combine(stubDir, $"{moduleName}__{sanitizedFileName}.cs");
-                        File.WriteAllText(outputPath, src);
-                    } catch (Exception ex) {
-                        Console.Error.WriteLine($"[warn] {baseTypeName}: {ex.Message}");
-                    }
                     return typeEntry;
-                })
-            )
+                });
+
+                // export the matched type handles for the stub builder step
+                if (matchedTypeIds.Count > 0) {
+                    IdModules[moduleName] = matchedTypeIds.ToArray();
+                }
+
+                // decompile all matched methods of this module to one file
+                if (matchedMethodIds.Count > 0 && decByAsm.TryGetValue(moduleName, out var moduleDec)) {
+                    try {
+                        var src = moduleDec.DecompileAsString(matchedMethodIds);
+                        StubbedModules[moduleName] = src;
+                        if(debug){
+                            var outputPath = Path.Combine(stubDir, $"{moduleName}.cs");
+                            File.WriteAllText(outputPath, src);
+                        }
+                    } catch (Exception ex) {
+                        Console.Error.WriteLine($"[warn] {moduleName}: {ex.Message}");
+                    }
+                }
+                return result;
+            })
         );
-        var stubDictJson = stubDict.Json();
-        File.WriteAllText(Path.Combine(outDir, "0010-stub_structure.json"), stubDictJson);
+        if(debug){
+            var stubDictJson = stubDict.Json();
+            File.WriteAllText(Path.Combine(outDir, "0010-stub_structure.json"), stubDictJson);
+        }
         return stubDict;
     }
 }
