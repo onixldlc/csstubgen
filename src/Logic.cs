@@ -54,12 +54,12 @@ class Logic
         // 3. go trough all the entries and decompiles per dll required
         var type_list = StubStructurizer.Execute(no_unity_core, refDlls, libDlls, outDir, debug);
         if(debug){
-            var stubbedModulesJson = StubStructurizer.JsonStubbedModules();
+            var stubbedModulesJson = StubStructurizer.JsonHalfStubbedModules();
             File.WriteAllText(Path.Combine(outDir, "0012-stubbed_modules.json"), stubbedModulesJson);
         }
 
         // 4. generate stubs based on the decompilation
-        var decompiled = StubStructurizer.StubbedModules;
+        var decompiled = StubStructurizer.HalfStubbedModules;
         if(debug){
             foreach(var (moduleName, stub) in decompiled){
                 var stubDir = Path.Combine(outDir, "0012-stubs");
@@ -69,14 +69,23 @@ class Logic
             }
         }
 
-        // 5. build per-module stubs from the matched type handles collected in step 3
-        var idModules = StubStructurizer.IdModules;
-        StubBuilder.Execute(idModules, refDlls, libDlls, outDir, debug);
+        // 5. dump all stub modules
+        StubBuilder.Execute(StubStructurizer.IdModules, refDlls, libDlls, outDir, debug);
+
+
+        // 6. filter things out!
+        // TreeReplace works per-module string, so loop and feed each one in
+        var filteredStubDir = Path.Combine(outDir, "0014-stubs");
+        var stubModuled = StubBuilder.FullStubModule;
+        Directory.CreateDirectory(filteredStubDir);
+        foreach(var (moduleName, stub) in stubModuled){
+            var filteredStub = TreeReplace.Execute(no_unity_core, stub);
+            var outPath = Path.Combine(filteredStubDir, $"{moduleName}.cs");
+            File.WriteAllText(outPath, filteredStub);
+        }
 
 
 
-
-        
         return 0;
     }
 

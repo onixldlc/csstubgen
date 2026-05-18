@@ -10,8 +10,8 @@ namespace CsStubGen;
 
 class StubBuilder
 {
-    public static Dictionary<string, string> BuiltStubs { get; set; } = new Dictionary<string, string>();
-    public static Dictionary<string, string> GetBuiltStubs(){return BuiltStubs;}
+    public static Dictionary<string, string> FullStubModule { get; set; } = new Dictionary<string, string>();
+    public static Dictionary<string, string> GetFullStubModule(){return FullStubModule;}
 
     public static void Execute(Dictionary<string, EntityHandle[]> idModules, IEnumerable<string> refDlls, IEnumerable<string> libDlls, string outDir, bool debug)
     {
@@ -28,7 +28,7 @@ class StubBuilder
             } catch { }
         }
 
-        var stubDir = Path.Combine(outDir, "0014-stubs");
+        var stubDir = Path.Combine(outDir, "0013-stubs");
         Directory.CreateDirectory(stubDir);
 
         foreach (var kv in idModules)
@@ -50,7 +50,7 @@ class StubBuilder
                 // decompile ALL the matched types in one go -> get one wrapped .cs
                 // (namespace + class scaffolding included, signatures only)
                 var src = dec.DecompileAsString(typeHandles);
-                BuiltStubs[moduleName] = src;
+                FullStubModule[moduleName] = src;
                 var outPath = Path.Combine(stubDir, $"{moduleName}.cs");
                 File.WriteAllText(outPath, src);
             } catch (Exception ex) {

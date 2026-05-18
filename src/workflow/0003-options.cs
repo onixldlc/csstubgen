@@ -261,7 +261,6 @@ class DecompilerOptions
         settings.UsePrimaryConstructorSyntaxForNonRecordTypes = UsePrimaryConstructorSyntaxForNonRecordTypes;
         settings.FunctionPointers = FunctionPointers;
         settings.ScopedRef = ScopedRef;
-        settings.LifetimeAnnotations = LifetimeAnnotations;
         settings.RequiredMembers = RequiredMembers;
         settings.SwitchExpressions = SwitchExpressions;
         settings.FileScopedNamespaces = FileScopedNamespaces;

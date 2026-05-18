@@ -147,7 +147,9 @@ public static class SourceAnalyzer
                 });
             }
 
-            // Also collect member access on fields/properties
+            // Also collect member access on fields/properties/events.
+            // These also need to flow into CalledMethods so MethodsParser picks them up
+            // (otherwise the stub whitelist has no fields/props and TreeReplace nukes them).
             foreach (var memberAccess in root.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
             {
                 var si = model.GetSymbolInfo(memberAccess);
@@ -155,7 +157,10 @@ public static class SourceAnalyzer
                 if (symbol == null) continue;
 
                 var kind = symbol.Kind;
-                if (kind != SymbolKind.Property && kind != SymbolKind.Field && kind != SymbolKind.Event) continue;
+                bool isProperty = kind == SymbolKind.Property;
+                bool isField    = kind == SymbolKind.Field;
+                bool isEvent    = kind == SymbolKind.Event;
+                if (!isProperty && !isField && !isEvent) continue;
 
                 var containingType = symbol.ContainingType;
                 var asm = containingType?.ContainingAssembly;
@@ -163,13 +168,29 @@ public static class SourceAnalyzer
 
                 var typeName = containingType.ToDisplayString();
                 var memberName = symbol.Name;
+                var asmName = asm.Name;
 
+                // existing UsedMembers / TypeAssembly bookkeeping
                 if (!result.UsedMembers.TryGetValue(typeName, out var members))
                     result.UsedMembers[typeName] = members = new HashSet<string>(StringComparer.Ordinal);
                 members.Add(memberName);
 
                 if (!result.TypeAssembly.ContainsKey(typeName))
-                    result.TypeAssembly[typeName] = asm.Name;
+                    result.TypeAssembly[typeName] = asmName;
+
+                // also push it into CalledMethods so MethodsParser puts it in MethodsDictionary.
+                // dedup by name like the invocation loop above.
+                bool alreadyTracked = result.CalledMethods.Any(m => m.Method == memberName);
+                if (alreadyTracked) continue;
+
+                result.CalledMethods.Add(new CalledMethodEntry
+                {
+                    Method = memberName,
+                    Group = "external",
+                    Type = typeName,
+                    Source = asmName,
+                    Details = $"{typeName} ({asmName})"
+                });
             }
         }
 

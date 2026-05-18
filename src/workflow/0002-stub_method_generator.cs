@@ -11,17 +11,23 @@ namespace CsStubGen;
 class StubStructurizer
 {   
     public static Dictionary<string, EntityHandle[]> IdModules { get; set; } = new Dictionary<string, EntityHandle[]>();
-    public static Dictionary<string, string> StubbedModules { get; set; } = new Dictionary<string, string>();
-    public static Dictionary<string, string> GetStubbedModules(){return StubbedModules;}
+    public static Dictionary<string, string> HalfStubbedModules { get; set; } = new Dictionary<string, string>();
+    public static Dictionary<string, string> StubbedTypes { get; set; } = new Dictionary<string, string>();
+    public static Dictionary<string, string> GetHalfStubbedModules(){return HalfStubbedModules;}
+    public static Dictionary<string, string> GetStubbedTypes(){return StubbedTypes;}
     public static Dictionary<string, EntityHandle[]> GetIdModules(){return IdModules; }
-    public static string JsonStubbedModules() 
+    public static string JsonHalfStubbedModules(){return Jsonify(HalfStubbedModules);}
+    public static string JsonStubbedTypes(){return Jsonify(StubbedTypes);}
+    private static string Jsonify(object obj)
     {
-        return System.Text.Json.JsonSerializer.Serialize(StubbedModules, new System.Text.Json.JsonSerializerOptions
+        return System.Text.Json.JsonSerializer.Serialize(obj, new System.Text.Json.JsonSerializerOptions
         {
             WriteIndented = true,
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         });
     }
+
+
     public static MethodsDictionary Execute(MethodsDictionary srcMethodDict, IEnumerable<string> refDlls, IEnumerable<string> libDlls, string outDir, bool debug)
     {
         var settings = DecompilerOptions.Build();
@@ -120,6 +126,21 @@ class StubStructurizer
                         }
                     }
 
+                    // decompile all matched methods of THIS type to one combined string
+                    // and store it in StubbedTypes. no file dump, no early return.
+                    // any post-processing / file output is the job of stage 4.
+                    var typeMethodIds = srcMethodNameDict.Values.ToList();
+                    if (typeMethodIds.Count > 0)
+                    {
+                        try {
+                            var typeStub = dec.DecompileAsString(typeMethodIds);
+                            var typeKey = $"{moduleName}__{baseTypeName}";
+                            StubbedTypes[typeKey] = typeStub;
+                        } catch (Exception ex) {
+                            Console.Error.WriteLine($"[warn] {baseTypeName}: {ex.Message}");
+                        }
+                    }
+
                     return typeEntry;
                 });
 
@@ -132,7 +153,7 @@ class StubStructurizer
                 if (matchedMethodIds.Count > 0 && decByAsm.TryGetValue(moduleName, out var moduleDec)) {
                     try {
                         var src = moduleDec.DecompileAsString(matchedMethodIds);
-                        StubbedModules[moduleName] = src;
+                        HalfStubbedModules[moduleName] = src;
                         if(debug){
                             var outputPath = Path.Combine(stubDir, $"{moduleName}.cs");
                             File.WriteAllText(outputPath, src);
