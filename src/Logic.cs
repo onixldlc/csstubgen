@@ -79,7 +79,7 @@ class Logic
         var stubModuled = StubBuilder.FullStubModule;
         Directory.CreateDirectory(filteredStubDir);
         foreach(var (moduleName, stub) in stubModuled){
-            var filteredStub = TreeReplace.Execute(no_unity_core, stub);
+            var filteredStub = TreeReplace.Execute(no_unity_core, moduleName, stub);
             var outPath = Path.Combine(filteredStubDir, $"{moduleName}.cs");
             File.WriteAllText(outPath, filteredStub);
         }
