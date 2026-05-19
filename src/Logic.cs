@@ -77,12 +77,16 @@ class Logic
         // TreeReplace works per-module string, so loop and feed each one in
         var filteredStubDir = Path.Combine(outDir, "0014-stubs");
         var stubModuled = StubBuilder.FullStubModule;
+        var mappedTypes = new Dictionary<string, TreeNode>();
         Directory.CreateDirectory(filteredStubDir);
         foreach(var (moduleName, stub) in stubModuled){
-            var filteredStub = TreeReplace.Execute(no_unity_core, moduleName, stub);
-            var outPath = Path.Combine(filteredStubDir, $"{moduleName}.cs");
-            File.WriteAllText(outPath, filteredStub);
+            Console.WriteLine($"Processing module: {moduleName}");
+            var mapper = DllMapper.Execute(no_unity_core, moduleName, stub, outDir);
+            mappedTypes[moduleName] = mapper;
+            Console.WriteLine("");
         }
+
+        
 
 
 
